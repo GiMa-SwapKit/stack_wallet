@@ -1194,7 +1194,7 @@ class _TradeDetailsViewState extends ConsumerState<TradeDetailsView> {
                             } else if (trade.exchangeName.startsWith(
                               SwapKitExchange.exchangeName,
                             )) {
-                              url = "https://track.swapkit.dev";
+                              url = SwapKitExchange.trackingUrl(trade);
                             }
                         }
                         return ConditionalParent(

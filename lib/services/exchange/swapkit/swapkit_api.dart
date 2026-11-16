@@ -186,6 +186,10 @@ abstract class SwapKitAPI {
       // fail rather than silently drop the user's refund address
       "refundAddressSetting": "STRICT",
       "disableBuildTx": true,
+      // The user sends the deposit after the swap is created, often from an
+      // HD/UTXO wallet that has no single funded source address. Without
+      // this SwapKit rejects the swap with `insufficientBalance`.
+      "disableBalanceCheck": true,
     });
     return SkSwap.fromMap(Map<String, dynamic>.from(json as Map));
   }

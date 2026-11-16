@@ -1,6 +1,7 @@
 import 'package:decimal/decimal.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:stackwallet/models/exchange/response_objects/estimate.dart';
+import 'package:stackwallet/models/exchange/response_objects/trade.dart';
 import 'package:stackwallet/services/exchange/exchange.dart';
 import 'package:stackwallet/services/exchange/swapkit/response_objects/sk_quote.dart';
 import 'package:stackwallet/services/exchange/swapkit/response_objects/sk_swap.dart';
@@ -65,6 +66,44 @@ void main() {
       expect(await createError(addressRefund: ""), contains("refund address"));
       expect(await createError(fixedRate: true), contains("fixed rate"));
       expect(await createError(reversed: true), contains("reversed"));
+    });
+
+    Trade trade({required String payInTxid, String? other}) => Trade(
+      uuid: "uuid",
+      tradeId: "swap-id",
+      rateType: "estimated",
+      direction: "direct",
+      timestamp: DateTime.utc(2026),
+      updatedAt: DateTime.utc(2026),
+      payInCurrency: "BTC",
+      payInAmount: "0.01",
+      payInAddress: "bc1qdeposit",
+      payInNetwork: "btc",
+      payInExtraId: "",
+      payInTxid: payInTxid,
+      payOutCurrency: "ETH",
+      payOutAmount: "0.35",
+      payOutAddress: "0xdestination",
+      payOutNetwork: "eth",
+      payOutExtraId: "",
+      payOutTxid: "",
+      refundAddress: "bc1qrefund",
+      refundExtraId: "",
+      status: "Waiting",
+      exchangeName: "SwapKit (NEAR Intents)",
+      other: other,
+    );
+
+    test("tracking link deep links to the deposit tx once known", () {
+      const info = '{"swapkit":1,"routeId":"r","sellChainId":"bitcoin"}';
+      expect(
+        SwapKitExchange.trackingUrl(trade(payInTxid: "abc123", other: info)),
+        "https://track.swapkit.dev/tx/abc123?chainId=bitcoin",
+      );
+      expect(
+        SwapKitExchange.trackingUrl(trade(payInTxid: "abc123")),
+        "https://track.swapkit.dev",
+      );
     });
   });
 

@@ -97,8 +97,10 @@ class SwapKitExchange extends Exchange {
     "THOR": "rune",
     "MAYA": "cacao",
     "KUJI": "kuji",
-    "DOT": "dot",
   };
+
+  /// Chains SwapKit's /tokens still lists but that SwapKit no longer swaps.
+  static const Set<String> _unsupportedChains = {"DOT"};
 
   /// SwapKit chain code -> chainId expected by `POST /track`.
   static const Map<String, String> _chainToTrackChainId = {
@@ -176,9 +178,15 @@ class SwapKitExchange extends Exchange {
   /// ~6000 SwapKit tokens: every gas asset, every stablecoin, and ERC-20s on
   /// Ethereum that have a CoinGecko listing (Stack supports ERC-20 tokens).
   static bool _include(SkToken t) =>
-      t.isGasAsset ||
-      t.isStablecoin ||
-      (t.chain.toUpperCase() == "ETH" && t.coingeckoId != null);
+      !_unsupportedChains.contains(t.chain.toUpperCase()) &&
+      (t.isGasAsset ||
+          t.isStablecoin ||
+          (t.chain.toUpperCase() == "ETH" && t.coingeckoId != null));
+
+  /// True only for a chain's own coin, e.g. `BTC.BTC` or `ETH.ETH`, not for
+  /// ETH as the gas asset of Arbitrum, Base or Optimism.
+  static bool _isNativeCoin(SkToken t) =>
+      t.isGasAsset && _networkForChain(t.chain) == t.ticker.toLowerCase();
 
   // ===========================================================================
   // Exchange API
@@ -224,7 +232,7 @@ class SwapKitExchange extends Exchange {
           rateType: SupportedRateType.estimated,
           isAvailable: true,
           // a token on another chain (e.g. ETH on Arbitrum) is not the coin
-          isStackCoin: t.isGasAsset && AppConfig.isStackCoin(t.ticker),
+          isStackCoin: _isNativeCoin(t) && AppConfig.isStackCoin(t.ticker),
           tokenContract: t.contractAddress,
         );
         _identifiers[key] = t.identifier;
@@ -490,36 +498,51 @@ class SwapKitExchange extends Exchange {
   Future<ExchangeResponse<Trade>> updateTrade(Trade trade) async {
     try {
       final info = _SkTradeInfo.tryParse(trade.other);
+      final hash = _depositHash(trade);
 
-      // The deposit tx hash is the most reliable tracking key. Use the one we
-      // already know, or the txid recorded when the user sent from Stack.
-      String? hash = trade.payInTxid.isNotEmpty ? trade.payInTxid : null;
-      hash ??= TradeSentFromStackService().getTxidForTradeId(trade.tradeId);
+      // Once a deposit was sent the trade must not expire: a deposit made
+      // before the deadline can still be confirming after it.
+      final deadline = hash == null ? info?.depositDeadline : null;
 
-      final SkTrack t;
-      try {
-        t = await SwapKitAPI.track(
-          hash: info?.sellChainId != null ? hash : null,
-          chainId: info?.sellChainId,
-          depositChannelId: info?.depositChannelId,
-          depositAddress: info?.depositAddress ?? trade.payInAddress,
-          routeId: info?.routeId,
+      SkTrack? t;
+
+      // 1. The deposit tx hash is the most precise key.
+      if (hash != null && info?.sellChainId != null) {
+        t = await _trackOrNull(
+          () => SwapKitAPI.track(
+            hash: hash,
+            chainId: info!.sellChainId,
+            routeId: info.routeId,
+          ),
         );
-      } on SwapKitApiException catch (e) {
-        // Right after broadcast /track often 404s; nothing deposited yet is
-        // also a 404. Keep the trade waiting until the deposit deadline.
-        if (e.httpCode == 404) {
-          return ExchangeResponse(
-            value: trade.copyWith(
-              updatedAt: DateTime.now(),
-              status: _mapStatus("not_started", info?.depositDeadline),
-            ),
-          );
-        }
-        rethrow;
       }
 
-      final status = _mapStatus(t.status, info?.depositDeadline);
+      // 2. SwapKit answers an unknown or not yet indexed hash with
+      // `not_started` (or 404). The deposit channel / address is linked to
+      // the swap from the moment it is created, so ask by that as well.
+      if (t == null || _isNotStarted(t)) {
+        final byDeposit = await _trackOrNull(
+          () => SwapKitAPI.track(
+            depositChannelId: info?.depositChannelId,
+            depositAddress: info?.depositAddress ?? trade.payInAddress,
+            routeId: info?.routeId,
+          ),
+        );
+        if (byDeposit != null && (t == null || !_isNotStarted(byDeposit))) {
+          t = byDeposit;
+        }
+      }
+
+      if (t == null) {
+        return ExchangeResponse(
+          value: trade.copyWith(
+            updatedAt: DateTime.now(),
+            status: _mapStatus("not_started", deadline),
+          ),
+        );
+      }
+
+      final status = _mapStatus(t.status, deadline);
 
       return ExchangeResponse(
         value: trade.copyWith(
@@ -668,6 +691,40 @@ class SwapKitExchange extends Exchange {
     return r.providers.any((p) => p.endsWith("_STREAMING"))
         ? "$base streaming"
         : base;
+  }
+
+  /// Link shown under "Tracking" on the trade details page. Deep links to the
+  /// deposit transaction on SwapKit's tracker once its hash is known.
+  static String trackingUrl(Trade trade) {
+    const fallback = "https://track.swapkit.dev";
+    final chainId = _SkTradeInfo.tryParse(trade.other)?.sellChainId;
+    if (chainId == null) return fallback;
+    final hash = _depositHash(trade);
+    if (hash == null) return fallback;
+    return Uri.https("track.swapkit.dev", "/tx/$hash", {
+      "chainId": chainId,
+    }).toString();
+  }
+
+  /// The deposit tx hash SwapKit reported, or the txid recorded when the user
+  /// sent the deposit from Stack.
+  static String? _depositHash(Trade trade) => trade.payInTxid.isNotEmpty
+      ? trade.payInTxid
+      : TradeSentFromStackService().getTxidForTradeId(trade.tradeId);
+
+  static bool _isNotStarted(SkTrack t) =>
+      t.status == "not_started" || t.status == "unknown";
+
+  /// Runs a `/track` call. Returns null when SwapKit has nothing for that
+  /// key yet (404) or there is no key to ask with.
+  static Future<SkTrack?> _trackOrNull(Future<SkTrack> Function() call) async {
+    try {
+      return await call();
+    } on ExchangeException catch (e) {
+      if (e is SwapKitApiException && e.httpCode == 404) return null;
+      if (e.type == ExchangeExceptionType.orderNotFound) return null;
+      rethrow;
+    }
   }
 
   /// Map SwapKit `/track` statuses to the ChangeNOW style strings the trade
