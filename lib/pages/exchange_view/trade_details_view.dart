@@ -34,6 +34,7 @@ import '../../services/exchange/exolix/exolix_exchange.dart';
 import '../../services/exchange/lets_exchange/lets_exchange_exchange.dart';
 import '../../services/exchange/nanswap/nanswap_exchange.dart';
 import '../../services/exchange/simpleswap/simpleswap_exchange.dart';
+import '../../services/exchange/swapkit/swapkit_exchange.dart';
 import '../../services/exchange/trocador/trocador_exchange.dart';
 import '../../services/exchange/wizard_swap/wizard_swap_exchange.dart';
 import '../../themes/stack_colors.dart';
@@ -1190,6 +1191,10 @@ class _TradeDetailsViewState extends ConsumerState<TradeDetailsView> {
                               CypherGoatExchange.exchangeName,
                             )) {
                               url = trade.other ?? "error";
+                            } else if (trade.exchangeName.startsWith(
+                              SwapKitExchange.exchangeName,
+                            )) {
+                              url = "https://track.swapkit.dev";
                             }
                         }
                         return ConditionalParent(

@@ -21,6 +21,7 @@ import 'exolix/exolix_exchange.dart';
 import 'lets_exchange/lets_exchange_exchange.dart';
 import 'nanswap/nanswap_exchange.dart';
 import 'simpleswap/simpleswap_exchange.dart';
+import 'swapkit/swapkit_exchange.dart';
 import 'trocador/trocador_exchange.dart';
 import 'wizard_swap/wizard_swap_exchange.dart';
 
@@ -47,6 +48,8 @@ abstract class Exchange {
         return LetsExchangeExchange.instance;
       case CypherGoatExchange.exchangeName:
         return CypherGoatExchange.instance;
+      case SwapKitExchange.exchangeName:
+        return SwapKitExchange.instance;
       default:
         final split = name.split(" ");
         if (split.length >= 2) {

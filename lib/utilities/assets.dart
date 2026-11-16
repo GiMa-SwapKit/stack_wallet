@@ -16,6 +16,7 @@ import '../services/exchange/exolix/exolix_exchange.dart';
 import '../services/exchange/lets_exchange/lets_exchange_exchange.dart';
 import '../services/exchange/nanswap/nanswap_exchange.dart';
 import '../services/exchange/simpleswap/simpleswap_exchange.dart';
+import '../services/exchange/swapkit/swapkit_exchange.dart';
 import '../services/exchange/trocador/trocador_exchange.dart';
 import '../services/exchange/wizard_swap/wizard_swap_exchange.dart';
 
@@ -58,6 +59,8 @@ class _EXCHANGE {
 
   String get letsexchange => "${_path}letsexchange.svg";
 
+  String get swapKit => "${_path}swapkit.svg";
+
   String getIconFor({required String exchangeName}) {
     switch (exchangeName) {
       case SimpleSwapExchange.exchangeName:
@@ -78,6 +81,8 @@ class _EXCHANGE {
         return cypherGoat;
       case LetsExchangeExchange.exchangeName:
         return letsexchange;
+      case SwapKitExchange.exchangeName:
+        return swapKit;
       default:
         throw ArgumentError(
           "Invalid exchange name passed to "

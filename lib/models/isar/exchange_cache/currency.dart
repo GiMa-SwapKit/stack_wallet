@@ -17,6 +17,7 @@ import '../../../services/exchange/exchange.dart';
 import '../../../services/exchange/exolix/exolix_exchange.dart';
 import '../../../services/exchange/lets_exchange/lets_exchange_exchange.dart';
 import '../../../services/exchange/nanswap/nanswap_exchange.dart';
+import '../../../services/exchange/swapkit/swapkit_exchange.dart';
 import '../../../services/exchange/trocador/trocador_exchange.dart';
 import '../../../services/exchange/wizard_swap/wizard_swap_exchange.dart';
 import 'pair.dart';
@@ -107,6 +108,9 @@ class Currency {
 
       const (CypherGoatExchange) =>
         network.isNotEmpty ? network.toLowerCase() : ticker.toLowerCase(),
+
+      // network is already normalised to a lowercase fuzzy net when cached
+      const (SwapKitExchange) => network.toLowerCase(),
 
       _ => throw Exception("Unknown exchange: $exchangeName"),
     };

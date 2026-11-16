@@ -29,6 +29,7 @@ import 'cyphergoat/cyphergoat_exchange.dart';
 import 'exolix/exolix_exchange.dart';
 import 'lets_exchange/lets_exchange_exchange.dart';
 import 'nanswap/nanswap_exchange.dart';
+import 'swapkit/swapkit_exchange.dart';
 import 'trocador/trocador_exchange.dart';
 import 'wizard_swap/wizard_swap_exchange.dart';
 
@@ -222,6 +223,7 @@ class ExchangeDataLoadingService {
         // Add to this list when adding an exchange which doesn't supports Tor.
         if (!Prefs.instance.useTor) {
           futures.add(_loadChangeNowCurrencies());
+          futures.add(loadSwapKitCurrencies());
         }
 
         // wait for all loading futures to complete
@@ -375,6 +377,29 @@ class ExchangeDataLoadingService {
   //     );
   //   }
   // }
+
+  Future<void> loadSwapKitCurrencies() async {
+    if (_isar == null) {
+      await initDB();
+    }
+    final responseCurrencies = await SwapKitExchange.instance.getAllCurrencies(
+      false,
+    );
+
+    if (responseCurrencies.value != null) {
+      await (await isar).writeTxn(() async {
+        final idsToDelete = await (await isar).currencies
+            .where()
+            .exchangeNameEqualTo(SwapKitExchange.exchangeName)
+            .idProperty()
+            .findAll();
+        await (await isar).currencies.deleteAll(idsToDelete);
+        await (await isar).currencies.putAll(responseCurrencies.value!);
+      });
+    } else {
+      Logging.instance.w("loadSwapKitCurrencies: $responseCurrencies");
+    }
+  }
 
   Future<void> loadCypherGoatCurrencies() async {
     if (_isar == null) {

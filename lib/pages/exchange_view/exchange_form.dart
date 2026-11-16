@@ -90,6 +90,7 @@ class _ExchangeFormState extends ConsumerState<ExchangeForm> {
         NanswapExchange.instance,
         WizardSwapExchange.instance,
         CypherGoatExchange.instance,
+        SwapKitExchange.instance,
       ];
     }
   }
