@@ -84,6 +84,10 @@ class SkSwap {
   /// Base64 PSBT to sign, for UTXO routes SwapKit builds itself.
   final String? psbt;
 
+  /// Base64 serialised Solana transaction to sign, for `contractCall`
+  /// routes on Solana (e.g. Chainflip).
+  final String? solanaTx;
+
   SkSwap({
     required this.swapId,
     required this.routeId,
@@ -104,6 +108,7 @@ class SkSwap {
     this.evmTx,
     this.approvalTx,
     this.psbt,
+    this.solanaTx,
   });
 
   factory SkSwap.fromMap(Map<String, dynamic> map) {
@@ -129,6 +134,13 @@ class SkSwap {
       evmTx: txType == "EVM" ? SkEvmTx.tryParse(tx) : null,
       approvalTx: SkEvmTx.tryParse(map["approvalTx"]),
       psbt: txType == "PSBT" && tx is String && tx.isNotEmpty ? tx : null,
+      solanaTx:
+          txType == "SERIALIZED_BASE64" &&
+              tx is String &&
+              tx.isNotEmpty &&
+              (map["sellAsset"] as String).startsWith("SOL.")
+          ? tx
+          : null,
       swapId: map["swapId"] as String,
       routeId: map["routeId"] as String,
       createdAt:

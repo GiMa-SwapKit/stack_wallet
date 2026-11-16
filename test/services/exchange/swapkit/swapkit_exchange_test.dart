@@ -323,6 +323,37 @@ void main() {
       expect(memo.psbt, isNull);
     });
 
+    test("swap with a Solana program call", () {
+      final swap = SkSwap.fromMap({
+        ...swapBase,
+        "sellAsset": "SOL.SOL",
+        "txHint": "contractCall",
+        "txType": "SERIALIZED_BASE64",
+        "tx": "AQAAAA==",
+        "targetAddress": "J88B7gmadHzTNGiy54c9Ms8BsEXNdB2fntFyhKpk3qoT",
+      });
+      expect(swap.solanaTx, "AQAAAA==");
+      expect(swap.evmTx, isNull);
+      expect(swap.psbt, isNull);
+
+      final info = SwapKitTradeInfo.tryParse(
+        SwapKitTradeInfo(
+          routeId: "r",
+          depositChannelId: null,
+          depositAddress: null,
+          sellChainId: "solana",
+          providers: const ["CHAINFLIP"],
+          depositDeadline: null,
+          execution: SwapKitExecution.contractCall,
+          solanaTx: swap.solanaTx,
+          sellAsset: "SOL.USDC-EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          sourceAddress: "stnkw",
+        ).toJsonString(),
+      )!;
+      expect(info.solanaTx, "AQAAAA==");
+      expect(info.sellAsset, startsWith("SOL.USDC-"));
+    });
+
     test("trade info round trip", () {
       final info = SwapKitTradeInfo(
         routeId: "r",

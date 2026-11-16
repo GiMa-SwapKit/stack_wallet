@@ -18,6 +18,7 @@ import '../../../utilities/extensions/extensions.dart';
 import '../../../wallets/crypto_currency/crypto_currency.dart';
 import '../../../wallets/models/tx_data.dart';
 import '../../../wallets/wallet/impl/ethereum_wallet.dart';
+import '../../../wallets/wallet/impl/solana_wallet.dart';
 import '../../../wallets/wallet/wallet.dart';
 import '../../../wallets/wallet/wallet_mixin_interfaces/electrumx_interface.dart';
 import 'swapkit_trade_info.dart';
@@ -35,12 +36,19 @@ abstract final class SwapKitStackSend {
   /// transfer to its pay-in address.
   static bool handles(Trade trade) => _info(trade) != null;
 
-  /// Ticker of the wallet coin [trade] is sent from. A contract call (also
-  /// for an ERC-20 sell) is sent from an Ethereum wallet.
-  static String walletTicker(Trade trade) =>
-      _info(trade)?.execution == SwapKitExecution.contractCall
-      ? "ETH"
-      : trade.payInCurrency;
+  /// Ticker of the wallet coin [trade] is sent from. A contract call is sent
+  /// from the chain's own wallet, also for a token (ERC-20 from Ethereum,
+  /// SPL from Solana), since that wallet owns the tokens and pays the fee.
+  static String walletTicker(Trade trade) {
+    final info = _info(trade);
+    if (info?.execution != SwapKitExecution.contractCall) {
+      return trade.payInCurrency;
+    }
+    return _isSolana(info!) ? "SOL" : "ETH";
+  }
+
+  static bool _isSolana(SwapKitTradeInfo info) =>
+      info.sellChainId == "solana" || info.solanaTx != null;
 
   /// Warning to show next to the pay-in details of [trade], if a plain
   /// transfer to the pay-in address would not pay it.
@@ -57,7 +65,8 @@ abstract final class SwapKitStackSend {
             "The deposit is a transaction prepared for that wallet's coins; "
             "do not send to this address from another wallet.",
       SwapKitExecution.contractCall =>
-        "$send, from the Ethereum wallet ${info.sourceAddress ?? ""}. "
+        "$send, from the ${_isSolana(info) ? "Solana" : "Ethereum"} wallet "
+            "${info.sourceAddress ?? ""}. "
             "The deposit is a call to the provider's contract; do not send "
             "coins to this address directly.",
       SwapKitExecution.deposit => null,
@@ -130,13 +139,46 @@ abstract final class SwapKitStackSend {
         return txData;
 
       case SwapKitExecution.contractCall:
-        if (wallet is! EthereumWallet) {
-          throw Exception("Send this swap from an Ethereum wallet");
-        }
+        final chainName = _isSolana(info) ? "Solana" : "Ethereum";
         final myAddress = (await wallet.getCurrentReceivingAddress())!.value;
         final source = info.sourceAddress;
-        if (source != null && myAddress.toLowerCase() != source.toLowerCase()) {
-          throw Exception("Send this swap from the Ethereum wallet $source");
+        // hex (EVM) addresses are case-insensitive, base58 (Solana) are not
+        final sameAddress = source == null
+            ? true
+            : source.startsWith("0x")
+            ? myAddress.toLowerCase() == source.toLowerCase()
+            : myAddress == source;
+        if (!sameAddress) {
+          throw Exception("Send this swap from the $chainName wallet $source");
+        }
+
+        if (_isSolana(info)) {
+          if (wallet is! SolanaWallet || info.solanaTx == null) {
+            throw Exception("Send this swap from a Solana wallet");
+          }
+          // SOL moved by the program call; a token swap moves no SOL
+          final sellsSol =
+              info.sellAsset == null || info.sellAsset == "SOL.SOL";
+          return wallet.prepareSerializedTransaction(
+            base64Transaction: info.solanaTx!,
+            txData: TxData(
+              recipients: [
+                TxRecipient(
+                  address: address,
+                  amount: sellsSol
+                      ? amount
+                      : Amount.zeroWith(fractionDigits: coin.fractionDigits),
+                  isChange: false,
+                  addressType: coin.getAddressType(address)!,
+                ),
+              ],
+              note: note,
+            ),
+          );
+        }
+
+        if (wallet is! EthereumWallet) {
+          throw Exception("Send this swap from an Ethereum wallet");
         }
         final call = info.evmTx!;
         final approval = info.approvalTx;

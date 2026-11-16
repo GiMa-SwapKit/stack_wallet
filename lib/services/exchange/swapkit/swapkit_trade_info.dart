@@ -25,9 +25,10 @@ enum SwapKitExecution {
   /// coins. Send from Stack.
   psbt,
 
-  /// Send [SwapKitTradeInfo.evmTx] (after [SwapKitTradeInfo.approvalTx], if
-  /// any) from the Ethereum wallet at [SwapKitTradeInfo.sourceAddress].
-  /// Send from Stack.
+  /// A call to the provider's contract, sent from the wallet at
+  /// [SwapKitTradeInfo.sourceAddress]: [SwapKitTradeInfo.evmTx] (after
+  /// [SwapKitTradeInfo.approvalTx], if any) from Ethereum, or
+  /// [SwapKitTradeInfo.solanaTx] from Solana. Send from Stack.
   contractCall;
 
   /// Whether the trade can only be paid with "Send from Stack".
@@ -49,6 +50,11 @@ class SwapKitTradeInfo {
   final String? psbt;
   final SkEvmTx? evmTx;
   final SkEvmTx? approvalTx;
+  final String? solanaTx;
+
+  /// SwapKit identifier of the asset sold, e.g. `SOL.SOL` or
+  /// `SOL.USDC-EPjF…`.
+  final String? sellAsset;
 
   /// Address the swap was created for (the sending wallet's address for
   /// contract calls).
@@ -66,6 +72,8 @@ class SwapKitTradeInfo {
     this.psbt,
     this.evmTx,
     this.approvalTx,
+    this.solanaTx,
+    this.sellAsset,
     this.sourceAddress,
   });
 
@@ -82,6 +90,8 @@ class SwapKitTradeInfo {
     if (psbt != null) "psbt": psbt,
     if (evmTx != null) "evmTx": evmTx!.toMap(),
     if (approvalTx != null) "approvalTx": approvalTx!.toMap(),
+    if (solanaTx != null) "solanaTx": solanaTx,
+    if (sellAsset != null) "sellAsset": sellAsset,
     if (sourceAddress != null) "sourceAddress": sourceAddress,
   });
 
@@ -110,6 +120,8 @@ class SwapKitTradeInfo {
         psbt: map["psbt"] as String?,
         evmTx: SkEvmTx.tryParse(map["evmTx"]),
         approvalTx: SkEvmTx.tryParse(map["approvalTx"]),
+        solanaTx: map["solanaTx"] as String?,
+        sellAsset: map["sellAsset"] as String?,
         sourceAddress: map["sourceAddress"] as String?,
       );
     } catch (_) {

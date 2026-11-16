@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:decimal/decimal.dart';
 import 'package:isar_community/isar.dart';
@@ -25,6 +26,7 @@ import '../../../services/tor_service.dart';
 import '../../../utilities/amount/amount.dart';
 import '../../../utilities/logger.dart';
 import '../../../utilities/prefs.dart';
+import '../../../utilities/solana_raw_transaction.dart';
 import '../../../utilities/tor_plain_net_option_enum.dart';
 import '../../crypto_currency/crypto_currency.dart';
 import '../../models/tx_data.dart';
@@ -205,10 +207,127 @@ class SolanaWallet extends Bip39Wallet<Solana> {
     }
   }
 
+  /// Prepares a transaction someone else built for this wallet, e.g. a swap
+  /// provider's program call ([base64Transaction], legacy or v0).
+  ///
+  /// It must need exactly one signature, this wallet's, as fee payer, and
+  /// carry no signatures yet. [txData] has one recipient for display: the
+  /// account paid and the SOL moved (zero for a token swap). The fee is
+  /// quoted for the message with a fresh blockhash, which [confirmSend]
+  /// refreshes again right before signing.
+  Future<TxData> prepareSerializedTransaction({
+    required String base64Transaction,
+    required TxData txData,
+  }) async {
+    checkClient();
+
+    final tx = SolanaRawTransaction.fromBase64(base64Transaction);
+    final keyPair = await _getKeyPair();
+    if (tx.requiredSignatures != 1) {
+      throw Exception(
+        "The transaction needs ${tx.requiredSignatures} signatures, "
+        "but only this wallet can sign",
+      );
+    }
+    if (!_sameBytes(tx.feePayer, keyPair.publicKey.bytes)) {
+      throw Exception("The transaction was not built for this wallet");
+    }
+    if (tx.hasSignatures) {
+      throw Exception("The transaction is already signed");
+    }
+
+    final message = tx.withBlockhash(await _latestBlockhash());
+    final lamports =
+        await _rpcClient!.getFeeForMessage(base64Encode(message)) ?? 5000;
+    final fee = Amount(
+      rawValue: BigInt.from(lamports),
+      fractionDigits: cryptoCurrency.fractionDigits,
+    );
+
+    final sol =
+        txData.amount ??
+        Amount.zeroWith(fractionDigits: cryptoCurrency.fractionDigits);
+    if (sol + fee > info.cachedBalance.spendable) {
+      throw Exception("Insufficient SOL balance for this transaction and fee");
+    }
+
+    return txData.copyWith(fee: fee, solRawTransaction: base64Transaction);
+  }
+
+  Future<Uint8List> _latestBlockhash() async {
+    final blockhash = (await _rpcClient!.getLatestBlockhash()).value.blockhash;
+    return Uint8List.fromList(Ed25519HDPublicKey.fromBase58(blockhash).bytes);
+  }
+
+  static bool _sameBytes(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  /// Signs and broadcasts [TxData.solRawTransaction] with a fresh blockhash.
+  Future<TxData> _confirmRawTransaction(TxData txData) async {
+    final keyPair = await _getKeyPair();
+    final tx = SolanaRawTransaction.fromBase64(txData.solRawTransaction!);
+    final message = tx.withBlockhash(await _latestBlockhash());
+    final signature = await keyPair.sign(message);
+    final signed = SolanaRawTransaction.serialize([
+      Uint8List.fromList(signature.bytes),
+    ], message);
+
+    final txid = await _rpcClient!.sendTransaction(base64Encode(signed));
+
+    final recipient = txData.recipients!.first;
+    final value = txData.amount?.raw.toString() ?? "0";
+    final tempTx = TransactionV2(
+      walletId: walletId,
+      blockHash: null, // pending
+      hash: txid,
+      txid: txid,
+      timestamp: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      height: null, // pending
+      inputs: [
+        InputV2.isarCantDoRequiredInDefaultConstructor(
+          scriptSigHex: null,
+          scriptSigAsm: null,
+          sequence: null,
+          outpoint: null,
+          addresses: [keyPair.address],
+          valueStringSats: value,
+          witness: null,
+          innerRedeemScriptAsm: null,
+          coinbase: null,
+          walletOwns: true,
+        ),
+      ],
+      outputs: [
+        OutputV2.isarCantDoRequiredInDefaultConstructor(
+          scriptPubKeyHex: "00",
+          valueStringSats: value,
+          addresses: [recipient.address],
+          walletOwns: false,
+        ),
+      ],
+      version: -1,
+      type: isar.TransactionType.outgoing,
+      subType: isar.TransactionSubType.none,
+      otherData: jsonEncode({"overrideFee": txData.fee!.toJsonString()}),
+    );
+    await mainDB.updateOrPutTransactionV2s([tempTx]);
+
+    return txData.copyWith(txid: txid);
+  }
+
   @override
   Future<TxData> confirmSend({required TxData txData}) async {
     try {
       checkClient();
+
+      if (txData.solRawTransaction != null) {
+        return await _confirmRawTransaction(txData);
+      }
 
       final keyPair = await _getKeyPair();
       final recipientAccount = txData.recipients!.first;

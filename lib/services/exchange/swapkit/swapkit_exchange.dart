@@ -448,6 +448,8 @@ class SwapKitExchange extends Exchange {
         psbt: swap.psbt,
         evmTx: swap.evmTx,
         approvalTx: swap.approvalTx,
+        solanaTx: swap.solanaTx,
+        sellAsset: sellIdentifier,
         sourceAddress: execution == SwapKitExecution.contractCall
             ? addressRefund
             : null,
@@ -748,7 +750,7 @@ class SwapKitExchange extends Exchange {
           refundAddress: refundAddress,
           buildTx: true,
         );
-        if (swap.evmTx == null) {
+        if ((sellChain == "SOL" ? swap.solanaTx : swap.evmTx) == null) {
           throw ExchangeException(
             "SwapKit did not return a contract call for $provider",
             ExchangeExceptionType.generic,
@@ -768,11 +770,11 @@ class SwapKitExchange extends Exchange {
   // Sell chains on which Stack wallets can send more than a plain transfer.
   static const Set<String> _utxoChains = {"BTC", "LTC", "DOGE", "DASH", "BCH"};
   static const Set<String> _memoChains = {..._utxoChains, "SOL", "XLM"};
-  static const Set<String> _contractCallChains = {"ETH"};
+  static const Set<String> _contractCallChains = {"ETH", "SOL"};
 
   /// Route kinds to request when selling [sellIdentifier]: plain transfers
   /// always; memo routes for a memo chain's own coin; contract calls on
-  /// Ethereum (ETH and ERC-20s).
+  /// Ethereum and Solana (their coin and their tokens).
   static List<String> _txHintsFor(String sellIdentifier) {
     final chain = _chainOf(sellIdentifier).toUpperCase();
     final isChainCoin = !sellIdentifier.contains("-");

@@ -81,6 +81,11 @@ class TxData {
   /// ERC-20 `approve` transaction to broadcast right before
   /// [web3dartTransaction] (nonce - 1), e.g. for a swap router contract call.
   final web3dart.Transaction? ethApprovalTransaction;
+
+  /// Solana: a serialised transaction built by someone else (e.g. a swap
+  /// provider), base64, signed and broadcast as is apart from a fresh
+  /// blockhash.
+  final String? solRawTransaction;
   final int? nonce;
   final BigInt? chainId;
 
@@ -156,6 +161,7 @@ class TxData {
     this.ethEIP1559Fee,
     this.web3dartTransaction,
     this.ethApprovalTransaction,
+    this.solRawTransaction,
     this.nonce,
     this.chainId,
     this.solInstructions,
@@ -306,6 +312,7 @@ class TxData {
     EthEIP1559Fee? ethEIP1559Fee,
     web3dart.Transaction? web3dartTransaction,
     web3dart.Transaction? ethApprovalTransaction,
+    String? solRawTransaction,
     int? nonce,
     BigInt? chainId,
     List<Instruction>? solInstructions,
@@ -363,6 +370,7 @@ class TxData {
       web3dartTransaction: web3dartTransaction ?? this.web3dartTransaction,
       ethApprovalTransaction:
           ethApprovalTransaction ?? this.ethApprovalTransaction,
+      solRawTransaction: solRawTransaction ?? this.solRawTransaction,
       nonce: nonce ?? this.nonce,
       chainId: chainId ?? this.chainId,
       solInstructions: solInstructions ?? this.solInstructions,
@@ -414,6 +422,7 @@ class TxData {
       'ethEIP1559Fee: $ethEIP1559Fee, '
       'web3dartTransaction: $web3dartTransaction, '
       'ethApprovalTransaction: $ethApprovalTransaction, '
+      'solRawTransaction: $solRawTransaction, '
       'nonce: $nonce, '
       'chainId: $chainId, '
       'solInstructions: $solInstructions, '
