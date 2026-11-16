@@ -22,6 +22,7 @@ import '../../../providers/global/trades_service_provider.dart';
 import '../../../providers/global/wallets_provider.dart';
 import '../../../route_generator.dart';
 import '../../../services/exchange/exchange_response.dart';
+import '../../../services/exchange/swapkit/swapkit_stack_send.dart';
 import '../../../services/notifications_api.dart';
 import '../../../themes/stack_colors.dart';
 import '../../../utilities/amount/amount.dart';
@@ -214,9 +215,11 @@ class _StepScaffoldState extends ConsumerState<StepScaffold> {
     final model = ref.read(desktopExchangeModelProvider)!;
     final trade = model.trade!;
     final address = trade.payInAddress;
+    // a SwapKit contract call (also for an ERC-20) is sent from Ethereum
+    final walletTicker = SwapKitStackSend.walletTicker(trade);
     final coin =
-        AppConfig.getCryptoCurrencyForTicker(trade.payInCurrency) ??
-        AppConfig.getCryptoCurrencyByPrettyName(trade.payInCurrency);
+        AppConfig.getCryptoCurrencyForTicker(walletTicker) ??
+        AppConfig.getCryptoCurrencyByPrettyName(walletTicker);
     final payInDecimal = model.payInDecimal;
     if (payInDecimal == null) {
       showDialog<void>(
@@ -275,7 +278,9 @@ class _StepScaffoldState extends ConsumerState<StepScaffold> {
     } else {
       canSendFromStack =
           Util.isWalletCoinAndCanSendWithoutWalletOpenedIgnoringXMR(
-            model?.sendTicker ?? "",
+            model?.trade != null && SwapKitStackSend.handles(model!.trade!)
+                ? SwapKitStackSend.walletTicker(model.trade!)
+                : model?.sendTicker ?? "",
             ref.read(pWallets).wallets,
           );
     }

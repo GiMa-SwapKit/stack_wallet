@@ -19,6 +19,7 @@ import '../../../app_config.dart';
 import '../../../models/exchange/incomplete_exchange.dart';
 import '../../../providers/providers.dart';
 import '../../../route_generator.dart';
+import '../../../services/exchange/swapkit/swapkit_stack_send.dart';
 import '../../../themes/stack_colors.dart';
 import '../../../utilities/amount/amount.dart';
 import '../../../utilities/amount/amount_formatter.dart';
@@ -156,7 +157,7 @@ class _Step4ViewState extends ConsumerState<Step4View> {
 
     isWalletCoinAndCanSend =
         Util.isWalletCoinAndCanSendWithoutWalletOpenedIgnoringXMR(
-          model.trade!.payInCurrency,
+          SwapKitStackSend.walletTicker(model.trade!),
           ref.read(pWallets).wallets,
         );
 
@@ -304,7 +305,14 @@ class _Step4ViewState extends ConsumerState<Step4View> {
         addressType: wallet.cryptoCurrency.getAddressType(address)!,
       );
 
-      if (wallet is FiroWallet && !firoPublicSend) {
+      if (SwapKitStackSend.handles(model.trade!)) {
+        // memo deposit, PSBT or contract call: not a plain transfer
+        txDataFuture = SwapKitStackSend.prepare(
+          trade: model.trade!,
+          wallet: wallet,
+          amount: amount,
+        );
+      } else if (wallet is FiroWallet && !firoPublicSend) {
         txDataFuture = wallet.prepareSendSpark(
           txData: TxData(
             recipients: [recipient],
@@ -474,6 +482,26 @@ class _Step4ViewState extends ConsumerState<Step4View> {
                               ),
                               const SizedBox(height: 12),
                               _WarningInfo(model: model),
+                              if (SwapKitStackSend.manualSendWarning(
+                                    model.trade!,
+                                  )
+                                  case final warning?) ...[
+                                const SizedBox(height: 8),
+                                RoundedContainer(
+                                  color: Theme.of(context)
+                                      .extension<StackColors>()!
+                                      .warningBackground,
+                                  child: Text(
+                                    warning,
+                                    style: STextStyles.label700(context)
+                                        .copyWith(
+                                          color: Theme.of(context)
+                                              .extension<StackColors>()!
+                                              .warningForeground,
+                                        ),
+                                  ),
+                                ),
+                              ],
                               const SizedBox(height: 8),
                               DetailItem(
                                 title: "Amount",
@@ -537,10 +565,12 @@ class _Step4ViewState extends ConsumerState<Step4View> {
                               ),
                               const Spacer(),
                               const SizedBox(height: 12),
-                              PrimaryButton(
-                                label: "Show QR Code",
-                                onPressed: _showQr,
-                              ),
+                              // paying the QR code would be a plain transfer
+                              if (!SwapKitStackSend.handles(model.trade!))
+                                PrimaryButton(
+                                  label: "Show QR Code",
+                                  onPressed: _showQr,
+                                ),
                               if (isWalletCoinAndCanSend)
                                 const SizedBox(height: 12),
                               if (isWalletCoinAndCanSend)
@@ -616,9 +646,14 @@ class _SendFromButton extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     String buttonTitle = "Send from ${AppConfig.appName}";
 
+    // a SwapKit contract call (also for an ERC-20) is sent from Ethereum
+    final sendTicker = SwapKitStackSend.handles(model.trade!)
+        ? SwapKitStackSend.walletTicker(model.trade!)
+        : model.sendTicker;
+
     final tuple = ref.read(exchangeSendFromWalletIdStateProvider.state).state;
     if (tuple != null &&
-        model.sendTicker.toLowerCase() == tuple.item2.ticker.toLowerCase()) {
+        sendTicker.toLowerCase() == tuple.item2.ticker.toLowerCase()) {
       final walletName = ref.read(pWallets).getWallet(tuple.item1).info.name;
       buttonTitle = "Send from $walletName";
     }
@@ -627,8 +662,7 @@ class _SendFromButton extends ConsumerWidget {
       label: buttonTitle,
       onPressed: () async {
         if (tuple != null &&
-            model.sendTicker.toLowerCase() ==
-                tuple.item2.ticker.toLowerCase()) {
+            sendTicker.toLowerCase() == tuple.item2.ticker.toLowerCase()) {
           await confirmSend(tuple);
         } else {
           final payInDecimal = model.payInDecimal;
@@ -650,9 +684,7 @@ class _SendFromButton extends ConsumerWidget {
               shouldUseMaterialRoute: RouteGenerator.useMaterialPageRoute,
               builder: (BuildContext context) {
                 final coin = AppConfig.coins.firstWhere(
-                  (e) =>
-                      e.ticker.toLowerCase() ==
-                      model.trade!.payInCurrency.toLowerCase(),
+                  (e) => e.ticker.toLowerCase() == sendTicker.toLowerCase(),
                 );
 
                 return SendFromView(

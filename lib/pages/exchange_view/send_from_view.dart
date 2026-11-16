@@ -20,6 +20,7 @@ import '../../models/exchange/response_objects/trade.dart';
 import '../../pages_desktop_specific/desktop_exchange/desktop_exchange_view.dart';
 import '../../providers/providers.dart';
 import '../../route_generator.dart';
+import '../../services/exchange/swapkit/swapkit_stack_send.dart';
 import '../../services/exchange/trocador/trocador_exchange.dart';
 import '../../themes/coin_icon_provider.dart';
 import '../../themes/stack_colors.dart';
@@ -160,7 +161,12 @@ class _SendFromViewState extends ConsumerState<SendFromView> {
             Row(
               children: [
                 Text(
-                  "You need to send ${ref.watch(pAmountFormatter(coin)).format(amount)}",
+                  // a SwapKit contract call may sell an ERC-20 from an
+                  // Ethereum wallet, so show the trade's own amount and coin
+                  SwapKitStackSend.handles(trade)
+                      ? "You need to send ${trade.payInAmount} "
+                            "${trade.payInCurrency.toUpperCase()}"
+                      : "You need to send ${ref.watch(pAmountFormatter(coin)).format(amount)}",
                   style: isDesktop
                       ? STextStyles.desktopTextExtraExtraSmall(context)
                       : STextStyles.itemSubtitle(context),
@@ -277,8 +283,15 @@ class _SendFromCardState extends ConsumerState<SendFromCard> {
         addressType: wallet.cryptoCurrency.getAddressType(address)!,
       );
 
-      // if not firo then do normal send
-      if (shouldSendPublicFiroFunds == null) {
+      if (SwapKitStackSend.handles(trade)) {
+        // memo deposit, PSBT or contract call: not a plain transfer
+        txDataFuture = SwapKitStackSend.prepare(
+          trade: trade,
+          wallet: wallet,
+          amount: amount,
+        );
+      } else if (shouldSendPublicFiroFunds == null) {
+        // if not firo then do normal send
         final memo = coin is Stellar || coin is Solana
             ? trade.payInExtraId.isNotEmpty
                   ? trade.payInExtraId

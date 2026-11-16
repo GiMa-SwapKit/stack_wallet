@@ -6,6 +6,20 @@ Decimal? skDecimalOrNull(dynamic value) {
   return Decimal.tryParse(value.toString());
 }
 
+/// Integer from a number, a decimal string or a 0x hex string ("0x6f05").
+BigInt? skBigIntOrNull(dynamic value) {
+  if (value == null) return null;
+  if (value is int) return BigInt.from(value);
+  final s = value.toString().trim();
+  if (s.isEmpty) return null;
+  if (s.startsWith("0x") || s.startsWith("0X")) {
+    return s.length == 2
+        ? BigInt.zero
+        : BigInt.tryParse(s.substring(2), radix: 16);
+  }
+  return BigInt.tryParse(s);
+}
+
 String? skStringOrNull(dynamic value) {
   if (value == null) return null;
   final s = value.toString();

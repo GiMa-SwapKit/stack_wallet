@@ -77,6 +77,10 @@ class TxData {
   // eth & token specific
   final EthEIP1559Fee? ethEIP1559Fee;
   final web3dart.Transaction? web3dartTransaction;
+
+  /// ERC-20 `approve` transaction to broadcast right before
+  /// [web3dartTransaction] (nonce - 1), e.g. for a swap router contract call.
+  final web3dart.Transaction? ethApprovalTransaction;
   final int? nonce;
   final BigInt? chainId;
 
@@ -151,6 +155,7 @@ class TxData {
     this.paynymAccountLite,
     this.ethEIP1559Fee,
     this.web3dartTransaction,
+    this.ethApprovalTransaction,
     this.nonce,
     this.chainId,
     this.solInstructions,
@@ -300,6 +305,7 @@ class TxData {
     PaynymAccountLite? paynymAccountLite,
     EthEIP1559Fee? ethEIP1559Fee,
     web3dart.Transaction? web3dartTransaction,
+    web3dart.Transaction? ethApprovalTransaction,
     int? nonce,
     BigInt? chainId,
     List<Instruction>? solInstructions,
@@ -355,6 +361,8 @@ class TxData {
       paynymAccountLite: paynymAccountLite ?? this.paynymAccountLite,
       ethEIP1559Fee: ethEIP1559Fee ?? this.ethEIP1559Fee,
       web3dartTransaction: web3dartTransaction ?? this.web3dartTransaction,
+      ethApprovalTransaction:
+          ethApprovalTransaction ?? this.ethApprovalTransaction,
       nonce: nonce ?? this.nonce,
       chainId: chainId ?? this.chainId,
       solInstructions: solInstructions ?? this.solInstructions,
@@ -405,6 +413,7 @@ class TxData {
       'paynymAccountLite: $paynymAccountLite, '
       'ethEIP1559Fee: $ethEIP1559Fee, '
       'web3dartTransaction: $web3dartTransaction, '
+      'ethApprovalTransaction: $ethApprovalTransaction, '
       'nonce: $nonce, '
       'chainId: $chainId, '
       'solInstructions: $solInstructions, '

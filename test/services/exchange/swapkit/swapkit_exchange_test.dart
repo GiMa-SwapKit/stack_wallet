@@ -9,6 +9,10 @@ import 'package:stackwallet/services/exchange/swapkit/response_objects/sk_token.
 import 'package:stackwallet/services/exchange/swapkit/response_objects/sk_track.dart';
 import 'package:stackwallet/services/exchange/swapkit/swapkit_api.dart';
 import 'package:stackwallet/services/exchange/swapkit/swapkit_exchange.dart';
+import 'package:stackwallet/services/exchange/swapkit/swapkit_stack_send.dart';
+import 'package:stackwallet/services/exchange/swapkit/swapkit_trade_info.dart';
+import 'package:stackwallet/utilities/address_utils.dart';
+import 'package:stackwallet/utilities/amount/amount.dart';
 
 void main() {
   group("SwapKitExchange", () {
@@ -252,6 +256,166 @@ void main() {
         ],
       });
       expect(single.outboundHash, isNull);
+    });
+
+    // shapes taken from live /v3/swap responses
+    final swapBase = {
+      "swapId": "s",
+      "routeId": "r",
+      "createdAt": "2026-11-16T10:00:00.000Z",
+      "providers": ["THORCHAIN_STREAMING"],
+      "sellAsset": "ETH.USDC-0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "buyAsset": "BTC.BTC",
+      "sellAmount": "2000",
+      "expectedBuyAmount": "0.03",
+      "sourceAddress": "0xsource",
+      "destinationAddress": "bc1qdest",
+      "targetAddress": "0xD37BbE5744D730a1d98d8DC97c42F0Ca46aD7146",
+    };
+
+    test("swap with an EVM contract call and approval", () {
+      final swap = SkSwap.fromMap({
+        ...swapBase,
+        "txHint": "contractCall",
+        "txType": "EVM",
+        "tx": {
+          "to": "0xD37BbE5744D730a1d98d8DC97c42F0Ca46aD7146",
+          "from": "0xsource",
+          "gas": "0x27596",
+          "value": "0x6f05b59d3b20000",
+          "data": "0x44bc937b00",
+        },
+        "approvalTx": {
+          "to": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+          "from": "0xsource",
+          "value": "0",
+          "data": "0x095ea7b300",
+          "gasLimit": "0xdc29",
+        },
+      });
+      expect(swap.evmTx!.to, "0xD37BbE5744D730a1d98d8DC97c42F0Ca46aD7146");
+      expect(swap.evmTx!.value, BigInt.parse("6f05b59d3b20000", radix: 16));
+      expect(swap.evmTx!.gasLimit, 0x27596);
+      expect(swap.evmTx!.data, "0x44bc937b00");
+      expect(swap.approvalTx!.value, BigInt.zero);
+      expect(swap.approvalTx!.gasLimit, 0xdc29);
+      expect(swap.psbt, isNull);
+    });
+
+    test("swap with a PSBT and a memo route", () {
+      final psbt = SkSwap.fromMap({
+        ...swapBase,
+        "txHint": "transferWithMemo",
+        "txType": "PSBT",
+        "tx": "cHNidP8BAA==",
+        "memo": "0x0101fa",
+      });
+      expect(psbt.psbt, "cHNidP8BAA==");
+      expect(psbt.evmTx, isNull);
+
+      final memo = SkSwap.fromMap({
+        ...swapBase,
+        "txHint": "transferWithMemo",
+        "memo": "=:e:0xdest:176102572/1/0:-_/tan:7/0",
+      });
+      expect(memo.memo, startsWith("=:e:"));
+      expect(memo.txType, isNull);
+      expect(memo.psbt, isNull);
+    });
+
+    test("trade info round trip", () {
+      final info = SwapKitTradeInfo(
+        routeId: "r",
+        depositChannelId: null,
+        depositAddress: null,
+        sellChainId: "1",
+        providers: const ["CHAINFLIP"],
+        depositDeadline: null,
+        execution: SwapKitExecution.contractCall,
+        evmTx: SkEvmTx(
+          to: "0xrouter",
+          value: BigInt.from(500),
+          data: "0xdd68",
+          gasLimit: 161174,
+        ),
+        approvalTx: SkEvmTx(
+          to: "0xtoken",
+          value: BigInt.zero,
+          data: "0x095e",
+          gasLimit: null,
+        ),
+        sourceAddress: "0xsource",
+      );
+      final back = SwapKitTradeInfo.tryParse(info.toJsonString())!;
+      expect(back.execution, SwapKitExecution.contractCall);
+      expect(back.execution.needsStackWallet, isTrue);
+      expect(back.evmTx!.value, BigInt.from(500));
+      expect(back.evmTx!.gasLimit, 161174);
+      expect(back.approvalTx!.to, "0xtoken");
+      expect(back.sourceAddress, "0xsource");
+
+      // trades created before route kinds existed are plain deposits
+      final old = SwapKitTradeInfo.tryParse(
+        '{"swapkit":1,"routeId":"r","depositAddress":"bc1q"}',
+      )!;
+      expect(old.execution, SwapKitExecution.deposit);
+      expect(old.execution.needsStackWallet, isFalse);
+    });
+  });
+
+  group("SwapKit Send from Stack", () {
+    test("memo to OP_RETURN payload", () {
+      // text memos (THORChain, Maya, Harbor) are UTF-8
+      expect(SwapKitStackSend.memoToOpReturnHex("=:e:0x1"), "3d3a653a307831");
+      // 0x memos (Chainflip vault swaps) are raw bytes
+      expect(SwapKitStackSend.memoToOpReturnHex("0x0101FA"), "0101fa");
+    });
+
+    test("OP_RETURN script", () {
+      expect(AddressUtils.opReturnScriptFromHex("0101fa"), [
+        0x6a,
+        3,
+        1,
+        1,
+        0xfa,
+      ]);
+      final long = "ab" * 76;
+      expect(AddressUtils.opReturnScriptFromHex(long).sublist(0, 3), [
+        0x6a,
+        0x4c,
+        76,
+      ]);
+      expect(
+        () => AddressUtils.opReturnScriptFromHex("ab" * 81),
+        throwsFormatException,
+      );
+    });
+
+    test("PSBT payment checks", () {
+      Amount sats(int v) => Amount(rawValue: BigInt.from(v), fractionDigits: 8);
+
+      // live Chainflip PSBT: 0.05 BTC to the vault, 405 sats fee
+      SwapKitStackSend.checkPsbtPayment(
+        paid: sats(5000000),
+        fee: sats(405),
+        expected: sats(5000000),
+      );
+      expect(
+        () => SwapKitStackSend.checkPsbtPayment(
+          paid: sats(4000000),
+          fee: sats(405),
+          expected: sats(5000000),
+        ),
+        throwsException,
+      );
+      expect(
+        () => SwapKitStackSend.checkPsbtPayment(
+          paid: sats(5000000),
+          fee: sats(600000),
+          expected: sats(5000000),
+        ),
+        throwsException,
+      );
     });
   });
 }

@@ -9,6 +9,7 @@
  */
 
 import 'dart:convert';
+import 'dart:typed_data';
 
 import '../app_config.dart';
 import '../wallets/crypto_currency/crypto_currency.dart';
@@ -513,6 +514,22 @@ class AddressUtils {
 
     // value(8) + compact script length(1, since max script is 83 bytes) + script
     return 8 + 1 + scriptBytes;
+  }
+
+  /// `OP_RETURN <data>` output script for at most 80 bytes of hex [hex].
+  static Uint8List opReturnScriptFromHex(String hex) {
+    opReturnOutputVSizeFromHex(hex); // validates hex and size
+
+    final data = Uint8List.fromList([
+      for (int i = 0; i < hex.length; i += 2)
+        int.parse(hex.substring(i, i + 2), radix: 16),
+    ]);
+    return Uint8List.fromList([
+      0x6a, // OP_RETURN
+      if (data.length > 75) 0x4c, // OP_PUSHDATA1
+      data.length,
+      ...data,
+    ]);
   }
 }
 

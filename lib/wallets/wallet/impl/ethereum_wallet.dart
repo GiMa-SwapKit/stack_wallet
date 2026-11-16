@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:decimal/decimal.dart';
 import 'package:ethereum_addresses/ethereum_addresses.dart';
@@ -727,6 +728,101 @@ class EthereumWallet extends Bip39Wallet with PrivateKeyInterface {
     );
   }
 
+  /// Prepares a contract call from this wallet, e.g. a swap provider's router
+  /// deposit, optionally preceded by an ERC-20 `approve` ([approval]).
+  ///
+  /// [txData] must have one recipient: the contract ([to]) and the ETH value
+  /// sent with the call (zero for token swaps). Gas limits default to the
+  /// caller's values; without one the call is estimated, or a safe upper
+  /// bound is used when it cannot be estimated before the approval is mined.
+  /// Only gas actually used is paid.
+  Future<TxData> prepareContractCall({
+    required TxData txData,
+    required Uint8List data,
+    int? gasLimit,
+    ({String to, Uint8List data, int? gasLimit})? approval,
+  }) async {
+    final recipient = txData.recipients!.single;
+    final value = recipient.amount;
+    final myWeb3Address = await getMyWeb3Address();
+
+    final prep = await internalSharedPrepareSend(
+      txData: txData,
+      myWeb3Address: myWeb3Address,
+    );
+
+    final client = getEthClient();
+    final to = eth_wallet.EthereumAddress.fromHex(recipient.address);
+
+    int callGas;
+    if (gasLimit != null) {
+      callGas = gasLimit;
+    } else if (approval != null) {
+      // the call reverts in estimation until the approval is mined
+      callGas = kContractCallFallbackGasLimit;
+    } else {
+      try {
+        final estimate = await client.estimateGas(
+          sender: myWeb3Address,
+          to: to,
+          value: eth_wallet.EtherAmount.inWei(value.raw),
+          data: data,
+        );
+        callGas = (estimate.toInt() * 6) ~/ 5; // +20%
+      } catch (_) {
+        callGas = kContractCallFallbackGasLimit;
+      }
+    }
+    final approvalGas = approval == null
+        ? 0
+        : approval.gasLimit ?? kErc20ApproveGasLimit;
+
+    // both transactions are paid in ETH from this wallet
+    final feeEstimate = estimateEthFee(
+      prep.maxFeePerGas,
+      callGas + approvalGas,
+      cryptoCurrency.fractionDigits,
+    );
+    if (value + feeEstimate > info.cachedBalance.spendable) {
+      throw Exception("Insufficient ETH balance for this swap and its gas fee");
+    }
+
+    eth_wallet.EtherAmount wei(BigInt v) =>
+        eth_wallet.EtherAmount.fromBigInt(eth_wallet.EtherUnit.wei, v);
+
+    final approvalTx = approval == null
+        ? null
+        : web3.Transaction(
+            from: myWeb3Address,
+            to: eth_wallet.EthereumAddress.fromHex(approval.to),
+            maxGas: approvalGas,
+            value: wei(BigInt.zero),
+            data: approval.data,
+            nonce: prep.nonce,
+            maxFeePerGas: wei(prep.maxFeePerGas),
+            maxPriorityFeePerGas: wei(prep.maxPriorityFeePerGas),
+          );
+
+    final callTx = web3.Transaction(
+      from: myWeb3Address,
+      to: to,
+      maxGas: callGas,
+      value: wei(value.raw),
+      data: data,
+      nonce: approvalTx == null ? prep.nonce : prep.nonce + 1,
+      maxFeePerGas: wei(prep.maxFeePerGas),
+      maxPriorityFeePerGas: wei(prep.maxPriorityFeePerGas),
+    );
+
+    return txData.copyWith(
+      nonce: callTx.nonce,
+      web3dartTransaction: callTx,
+      ethApprovalTransaction: approvalTx,
+      fee: feeEstimate,
+      chainId: prep.chainId,
+    );
+  }
+
   @override
   Future<TxData> confirmSend({
     required TxData txData,
@@ -738,6 +834,16 @@ class EthereumWallet extends Bip39Wallet with PrivateKeyInterface {
     }
 
     try {
+      // An ERC-20 approval goes first (it has the lower nonce). If the main
+      // transaction then fails, the approval alone moves no funds.
+      if (txData.ethApprovalTransaction != null) {
+        await client.sendTransaction(
+          _credentials!,
+          txData.ethApprovalTransaction!,
+          chainId: txData.chainId!.toInt(),
+        );
+      }
+
       final txid = await client.sendTransaction(
         _credentials!,
         txData.web3dartTransaction!,

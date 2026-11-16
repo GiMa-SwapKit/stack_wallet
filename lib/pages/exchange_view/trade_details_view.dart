@@ -35,6 +35,7 @@ import '../../services/exchange/lets_exchange/lets_exchange_exchange.dart';
 import '../../services/exchange/nanswap/nanswap_exchange.dart';
 import '../../services/exchange/simpleswap/simpleswap_exchange.dart';
 import '../../services/exchange/swapkit/swapkit_exchange.dart';
+import '../../services/exchange/swapkit/swapkit_stack_send.dart';
 import '../../services/exchange/trocador/trocador_exchange.dart';
 import '../../services/exchange/wizard_swap/wizard_swap_exchange.dart';
 import '../../themes/stack_colors.dart';
@@ -202,11 +203,14 @@ class _TradeDetailsViewState extends ConsumerState<TradeDetailsView> {
 
     final isDesktop = Util.isDesktop;
 
+    // a SwapKit contract call (also for an ERC-20) is sent from Ethereum
+    final walletTicker = SwapKitStackSend.walletTicker(trade);
+
     final showSendFromStackButton =
         !hasTx &&
-        AppConfig.isStackCoin(trade.payInCurrency) &&
+        AppConfig.isStackCoin(walletTicker) &&
         Util.isWalletCoinAndCanSendWithoutWalletOpenedIgnoringXMR(
-          trade.payInCurrency,
+          walletTicker,
           ref.read(pWallets).wallets,
         ) &&
         (trade.status == "New" ||
@@ -279,11 +283,11 @@ class _TradeDetailsViewState extends ConsumerState<TradeDetailsView> {
                         CryptoCurrency coin;
                         try {
                           coin = AppConfig.getCryptoCurrencyForTicker(
-                            trade.payInCurrency,
+                            walletTicker,
                           )!;
                         } catch (_) {
                           coin = AppConfig.getCryptoCurrencyByPrettyName(
-                            trade.payInCurrency,
+                            walletTicker,
                           );
                         }
                         final amount = Amount.fromDecimal(
@@ -531,6 +535,24 @@ class _TradeDetailsViewState extends ConsumerState<TradeDetailsView> {
                                   ).extension<StackColors>()!.warningForeground,
                                 ),
                         ),
+                        if (SwapKitStackSend.manualSendWarning(trade)
+                            case final warning?)
+                          TextSpan(
+                            text: "\n\n$warning",
+                            style: isDesktop
+                                ? STextStyles.desktopTextExtraExtraSmall(
+                                    context,
+                                  ).copyWith(
+                                    color: Theme.of(context)
+                                        .extension<StackColors>()!
+                                        .accentColorRed,
+                                  )
+                                : STextStyles.label700(context).copyWith(
+                                    color: Theme.of(context)
+                                        .extension<StackColors>()!
+                                        .warningForeground,
+                                  ),
+                          ),
                       ],
                     ),
                   ),
@@ -1225,12 +1247,10 @@ class _TradeDetailsViewState extends ConsumerState<TradeDetailsView> {
                 onPressed: () {
                   CryptoCurrency coin;
                   try {
-                    coin = AppConfig.getCryptoCurrencyForTicker(
-                      trade.payInCurrency,
-                    )!;
+                    coin = AppConfig.getCryptoCurrencyForTicker(walletTicker)!;
                   } catch (_) {
                     coin = AppConfig.getCryptoCurrencyByPrettyName(
-                      trade.payInCurrency,
+                      walletTicker,
                     );
                   }
                   final amount = Amount.fromDecimal(

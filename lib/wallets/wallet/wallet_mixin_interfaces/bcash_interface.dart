@@ -7,6 +7,8 @@ import '../../../models/isar/models/blockchain_data/v2/input_v2.dart';
 import '../../../models/isar/models/blockchain_data/v2/output_v2.dart';
 import '../../../models/isar/models/blockchain_data/v2/transaction_v2.dart';
 import '../../../models/isar/models/isar_models.dart';
+import '../../../utilities/address_utils.dart';
+import '../../../utilities/extensions/extensions.dart';
 import '../../../utilities/logger.dart';
 import '../../crypto_currency/interfaces/electrumx_currency_interface.dart';
 import '../../models/tx_data.dart';
@@ -85,6 +87,20 @@ mixin BCashInterface<T extends ElectrumXCurrencyInterface>
                   .valueProperty()
                   .findFirst()) !=
               null,
+        ),
+      );
+    }
+
+    // OP_RETURN output, e.g. a THORChain swap memo
+    if (txData.opReturnData != null && txData.opReturnData!.isNotEmpty) {
+      final script = AddressUtils.opReturnScriptFromHex(txData.opReturnData!);
+      builder.addOutput(script, 0);
+      tempOutputs.add(
+        OutputV2.isarCantDoRequiredInDefaultConstructor(
+          scriptPubKeyHex: script.toHex,
+          valueStringSats: "0",
+          addresses: [],
+          walletOwns: false,
         ),
       );
     }

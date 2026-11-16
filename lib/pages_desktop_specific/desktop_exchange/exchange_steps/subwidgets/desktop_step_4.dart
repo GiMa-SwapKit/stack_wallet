@@ -15,6 +15,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../../app_config.dart';
 import '../../../../providers/providers.dart';
+import '../../../../services/exchange/swapkit/swapkit_stack_send.dart';
 import '../../../../themes/stack_colors.dart';
 import '../../../../utilities/text_styles.dart';
 import '../../../../widgets/rounded_container.dart';
@@ -131,6 +132,27 @@ class _DesktopStep4State extends ConsumerState<DesktopStep4> {
             ),
           ),
         ),
+        if (ref.watch(
+              desktopExchangeModelProvider.select((value) => value!.trade),
+            )
+            case final trade?
+            when SwapKitStackSend.manualSendWarning(trade) != null) ...[
+          const SizedBox(height: 12),
+          RoundedContainer(
+            color: Theme.of(context)
+                .extension<StackColors>()!
+                .warningBackground,
+            child: Text(
+              SwapKitStackSend.manualSendWarning(trade)!,
+              style: STextStyles.label700(context).copyWith(
+                color: Theme.of(context)
+                    .extension<StackColors>()!
+                    .warningForeground,
+                fontSize: 14,
+              ),
+            ),
+          ),
+        ],
         const SizedBox(height: 20),
         RoundedWhiteContainer(
           borderColor: Theme.of(context).extension<StackColors>()!.background,

@@ -38,11 +38,19 @@ abstract class SwapKitAPI {
 
   static const HTTP _client = HTTP();
 
-  /// Stack Wallet signs and broadcasts the deposit itself through its normal
-  /// send flow, so only routes that are a plain transfer to a deposit address
-  /// are usable. Routes requiring a memo/OP_RETURN or a contract call are
-  /// filtered out server side.
-  static const List<String> supportedTxHints = ["simpleTransfer"];
+  /// Route kinds, see `txHints` on `/v3/quote`:
+  /// - `simpleTransfer`: plain transfer to a deposit address, from any wallet;
+  /// - `transferWithMemo`: transfer carrying a memo (OP_RETURN on UTXO
+  ///   chains, a memo on Solana/Stellar), or a PSBT SwapKit builds;
+  /// - `contractCall`: call to a router contract on an EVM chain.
+  /// The last two can only be sent with "Send from Stack".
+  static const String hintTransfer = "simpleTransfer";
+  static const String hintMemo = "transferWithMemo";
+  static const String hintContractCall = "contractCall";
+
+  /// Route kinds any wallet can pay; used when the sell chain has no Stack
+  /// wallet that can send memos or contract calls.
+  static const List<String> supportedTxHints = [hintTransfer];
 
   static Uri _buildUri(String path, [Map<String, String>? params]) =>
       Uri.https(authority, path, params);
@@ -153,6 +161,7 @@ abstract class SwapKitAPI {
     String? sourceAddress,
     String? destinationAddress,
     num? slippage,
+    List<String> txHints = supportedTxHints,
   }) async {
     final json = await _post(_buildUri("/v3/quote"), {
       "sellAsset": sellAsset,
@@ -161,21 +170,26 @@ abstract class SwapKitAPI {
       if (sourceAddress != null) "sourceAddress": sourceAddress,
       if (destinationAddress != null) "destinationAddress": destinationAddress,
       if (slippage != null) "slippage": slippage,
-      "txHints": supportedTxHints,
+      "txHints": txHints,
     });
     return SkQuote.fromMap(Map<String, dynamic>.from(json as Map));
   }
 
   /// POST /v3/swap
   ///
-  /// [disableBuildTx] is true because Stack Wallet builds, signs and
-  /// broadcasts the deposit transaction itself. We only need the deposit
-  /// address, amounts and tracking identifiers.
+  /// With [buildTx] false (deposit and memo routes) Stack Wallet builds,
+  /// signs and broadcasts the deposit itself and only needs the deposit
+  /// address, memo, amounts and tracking identifiers. With [buildTx] true
+  /// SwapKit returns the transaction to sign: EVM call data (plus an ERC-20
+  /// approval when needed) or a PSBT spending [sourceAddress]'s coins. On UTXO
+  /// chains [sourceAddress] may list several addresses separated by `;`.
   static Future<SkSwap> createSwap({
     required String routeId,
     required String sourceAddress,
     required String destinationAddress,
     String? refundAddress,
+    bool buildTx = false,
+    bool checkBalance = false,
   }) async {
     final json = await _post(_buildUri("/v3/swap"), {
       "routeId": routeId,
@@ -185,11 +199,11 @@ abstract class SwapKitAPI {
         "refundAddress": refundAddress,
       // fail rather than silently drop the user's refund address
       "refundAddressSetting": "STRICT",
-      "disableBuildTx": true,
-      // The user sends the deposit after the swap is created, often from an
-      // HD/UTXO wallet that has no single funded source address. Without
-      // this SwapKit rejects the swap with `insufficientBalance`.
-      "disableBalanceCheck": true,
+      "disableBuildTx": !buildTx,
+      // Deposit routes are paid after the swap is created, often from an
+      // HD/UTXO wallet with no single funded source address. Without this
+      // SwapKit rejects them with `insufficientBalance`.
+      "disableBalanceCheck": !checkBalance,
     });
     return SkSwap.fromMap(Map<String, dynamic>.from(json as Map));
   }

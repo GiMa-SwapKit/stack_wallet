@@ -14,12 +14,14 @@ import 'package:isar_community/isar.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../app_config.dart';
+import '../../../db/isar/main_db.dart';
 import '../../../exceptions/exchange/exchange_exception.dart';
 import '../../../models/exchange/response_objects/estimate.dart';
 import '../../../models/exchange/response_objects/range.dart';
 import '../../../models/exchange/response_objects/trade.dart';
 import '../../../models/isar/exchange_cache/currency.dart';
 import '../../../models/isar/exchange_cache/pair.dart';
+import '../../../models/isar/models/isar_models.dart';
 import '../../trade_sent_from_stack_service.dart';
 import '../exchange.dart';
 import '../exchange_data_loading_service.dart';
@@ -29,6 +31,7 @@ import 'response_objects/sk_swap.dart';
 import 'response_objects/sk_token.dart';
 import 'response_objects/sk_track.dart';
 import 'swapkit_api.dart';
+import 'swapkit_trade_info.dart';
 
 /// SwapKit (https://swapkit.dev) cross-chain swap aggregator.
 ///
@@ -36,9 +39,11 @@ import 'swapkit_api.dart';
 /// Intents, THORChain, Maya, ...). Each route is shown in the provider list as
 /// its own estimate, like Trocador's partners, e.g. "SwapKit (Chainflip)".
 ///
-/// Only routes whose deposit is a plain transfer to a deposit address
-/// (`txHint == simpleTransfer`) are requested, so the existing
-/// "send to pay-in address" flow works unchanged for every coin.
+/// Routes that are a plain transfer to a deposit address work like any other
+/// provider: the user can pay from any wallet. Memo routes (THORChain, Maya,
+/// Harbor, ...), Chainflip vault swaps (a PSBT SwapKit builds) and EVM
+/// contract calls are offered where a Stack wallet can send them, and are
+/// paid with "Send from Stack" (see [SwapKitExecution]).
 class SwapKitExchange extends Exchange {
   SwapKitExchange._();
 
@@ -57,8 +62,8 @@ class SwapKitExchange extends Exchange {
   @override
   bool get supportsRefundAddress => true;
 
-  /// Memo routes are filtered out (see [SwapKitAPI.supportedTxHints]) and
-  /// SwapKit has no separate payout memo field.
+  /// SwapKit has no payout (destination) memo field. Deposit memos are
+  /// attached by "Send from Stack", see [SwapKitExecution.memo].
   @override
   bool get supportsExtraId => false;
 
@@ -147,6 +152,10 @@ class SwapKitExchange extends Exchange {
 
   /// ticker|network (sell side) -> min amount last reported by SwapKit.
   final Map<String, Decimal> _lastReportedMin = {};
+
+  /// routeId -> route of the latest quote, so [createTrade] knows the route
+  /// kind of the estimate the user picked.
+  final Map<String, SkRoute> _routes = {};
 
   Future<String> _identifierFor(String ticker, String? network) async {
     final key = _key(ticker, network);
@@ -310,7 +319,7 @@ class SwapKitExchange extends Exchange {
               reversed: false,
               exchangeProvider: _displayName(r),
               rateId: r.routeId,
-              warningMessage: r.warnings.isEmpty ? null : r.warnings.join("\n"),
+              warningMessage: _warningFor(r),
             ),
           )
           .toList();
@@ -380,53 +389,68 @@ class SwapKitExchange extends Exchange {
       }
 
       final providerName = estimate?.exchangeProvider;
-
-      SkSwap swap;
-      try {
-        final routeId =
-            estimate?.rateId ??
-            (await _requoteRoute(
-              from,
-              fromNetwork,
-              to,
-              toNetwork,
-              amount,
-              providerName,
-            )).routeId;
-        swap = await _swap(routeId, addressRefund, addressTo);
-      } on SwapKitApiException catch (e) {
-        // routeIds are cached for ~5 minutes; re-quote once if it expired.
-        if (e.errorCode != "swapRouteNotFound") rethrow;
-        final route = await _requoteRoute(
-          from,
-          fromNetwork,
-          to,
-          toNetwork,
-          amount,
-          providerName,
-        );
-        swap = await _swap(route.routeId, addressRefund, addressTo);
-      }
-
-      // Defensive: we only ask for simpleTransfer routes. A memo we cannot
-      // attach would mean funds are not credited to this swap.
-      if (swap.memo != null ||
-          (swap.txHint ?? "simpleTransfer") != "simpleTransfer") {
-        throw ExchangeException(
-          "SwapKit returned a route that needs a memo/contract call, "
-          "which Stack Wallet cannot send",
-          ExchangeExceptionType.generic,
-        );
-      }
-
       final sellIdentifier = await _identifierFor(from, fromNetwork);
-      final info = _SkTradeInfo(
+      final sellChain = _chainOf(sellIdentifier).toUpperCase();
+
+      Future<SkRoute> requote() =>
+          _requoteRoute(from, fromNetwork, to, toNetwork, amount, providerName);
+
+      SkRoute route =
+          (estimate?.rateId == null ? null : _routes[estimate!.rateId]) ??
+          await requote();
+
+      ({SkSwap swap, SwapKitExecution execution}) created;
+      try {
+        try {
+          created = await _createSwapFor(
+            route: route,
+            sellChain: sellChain,
+            refundAddress: addressRefund,
+            destinationAddress: addressTo,
+          );
+        } on SwapKitApiException catch (e) {
+          // routeIds are cached for ~5 minutes; re-quote once if it expired.
+          if (e.errorCode != "swapRouteNotFound") rethrow;
+          route = await requote();
+          created = await _createSwapFor(
+            route: route,
+            sellChain: sellChain,
+            refundAddress: addressRefund,
+            destinationAddress: addressTo,
+          );
+        }
+      } on SwapKitApiException catch (e) {
+        if (e.errorCode == "insufficientBalance") {
+          throw ExchangeException(
+            "The wallet you are swapping from does not hold enough "
+            "${from.toUpperCase()} (and network fee) for this swap",
+            ExchangeExceptionType.generic,
+          );
+        }
+        rethrow;
+      }
+      final swap = created.swap;
+      final execution = created.execution;
+
+      final info = SwapKitTradeInfo(
         routeId: swap.routeId,
         depositChannelId: swap.depositChannelId,
-        depositAddress: swap.depositAddress,
-        sellChainId: _chainToTrackChainId[_chainOf(sellIdentifier)],
+        // a memo / router / PSBT target is shared by every user of the
+        // provider, so it must not be used to look this swap up
+        depositAddress: execution == SwapKitExecution.deposit
+            ? swap.depositAddress
+            : null,
+        sellChainId: _chainToTrackChainId[sellChain],
         providers: swap.providers,
         depositDeadline: swap.depositChannelExpiration,
+        execution: execution,
+        memo: execution == SwapKitExecution.memo ? swap.memo : null,
+        psbt: swap.psbt,
+        evmTx: swap.evmTx,
+        approvalTx: swap.approvalTx,
+        sourceAddress: execution == SwapKitExecution.contractCall
+            ? addressRefund
+            : null,
       );
 
       final provider = providerName ?? _displayNameForProviders(swap.providers);
@@ -443,7 +467,8 @@ class SwapKitExchange extends Exchange {
           payInAmount: swap.sellAmount.toString(),
           payInAddress: swap.depositAddress,
           payInNetwork: fromNetwork ?? "",
-          payInExtraId: "",
+          // shown with the deposit address, like other providers' memos
+          payInExtraId: info.memo ?? "",
           payInTxid: "",
           payOutCurrency: to.toUpperCase(),
           payOutAmount: swap.expectedBuyAmount.toString(),
@@ -497,7 +522,7 @@ class SwapKitExchange extends Exchange {
   @override
   Future<ExchangeResponse<Trade>> updateTrade(Trade trade) async {
     try {
-      final info = _SkTradeInfo.tryParse(trade.other);
+      final info = SwapKitTradeInfo.tryParse(trade.other);
       final hash = _depositHash(trade);
 
       // Once a deposit was sent the trade must not expire: a deposit made
@@ -524,7 +549,10 @@ class SwapKitExchange extends Exchange {
         final byDeposit = await _trackOrNull(
           () => SwapKitAPI.track(
             depositChannelId: info?.depositChannelId,
-            depositAddress: info?.depositAddress ?? trade.payInAddress,
+            // older trades have no info: fall back to the pay-in address
+            depositAddress: info == null
+                ? trade.payInAddress
+                : info.depositAddress,
             routeId: info?.routeId,
           ),
         );
@@ -586,6 +614,7 @@ class SwapKitExchange extends Exchange {
         sellAsset: sellAsset,
         buyAsset: buyAsset,
         sellAmount: amount,
+        txHints: _txHintsFor(sellAsset),
       );
     } on SwapKitApiException catch (e) {
       if (e.errorCode == "noRoutesFound") {
@@ -601,6 +630,10 @@ class SwapKitExchange extends Exchange {
     if (min != null) {
       _lastReportedMin[_key(from, fromNetwork)] = min;
     }
+    // routeIds are only valid for ~5 minutes, keep just the latest quote's
+    _routes
+      ..clear()
+      ..addEntries(quote.routes.map((r) => MapEntry(r.routeId, r)));
     return quote;
   }
 
@@ -626,24 +659,188 @@ class SwapKitExchange extends Exchange {
     );
   }
 
-  Future<SkSwap> _swap(String routeId, String source, String destination) =>
-      SwapKitAPI.createSwap(
-        routeId: routeId,
-        sourceAddress: source,
-        destinationAddress: destination,
-        refundAddress: source,
+  /// Creates the SwapKit swap for [route] and works out how the user pays it.
+  Future<({SkSwap swap, SwapKitExecution execution})> _createSwapFor({
+    required SkRoute route,
+    required String sellChain,
+    required String refundAddress,
+    required String destinationAddress,
+  }) async {
+    final provider = _displayName(route);
+    switch (route.txHint ?? SwapKitAPI.hintTransfer) {
+      case SwapKitAPI.hintTransfer:
+        final swap = await SwapKitAPI.createSwap(
+          routeId: route.routeId,
+          sourceAddress: refundAddress,
+          destinationAddress: destinationAddress,
+          refundAddress: refundAddress,
+        );
+        if (swap.memo != null) {
+          // a memo we do not attach means the deposit is not credited
+          throw ExchangeException(
+            "SwapKit returned a memo for a plain transfer route",
+            ExchangeExceptionType.generic,
+          );
+        }
+        return (swap: swap, execution: SwapKitExecution.deposit);
+
+      case SwapKitAPI.hintMemo when _needsPsbt(route, sellChain):
+        // Chainflip vault swaps need a fixed output layout, so SwapKit builds
+        // the transaction from the wallet's coins and the wallet signs it.
+        final walletId = await _stackWalletIdOwning(
+          refundAddress,
+          provider,
+          sellChain,
+        );
+        final sources = await _spendableAddresses(walletId);
+        final swap = await SwapKitAPI.createSwap(
+          routeId: route.routeId,
+          sourceAddress: sources.join(";"),
+          destinationAddress: destinationAddress,
+          refundAddress: refundAddress,
+          buildTx: true,
+          checkBalance: true,
+        );
+        if (swap.psbt == null) {
+          throw ExchangeException(
+            "SwapKit did not return a transaction to sign for $provider",
+            ExchangeExceptionType.generic,
+          );
+        }
+        return (swap: swap, execution: SwapKitExecution.psbt);
+
+      case SwapKitAPI.hintMemo:
+        final swap = await SwapKitAPI.createSwap(
+          routeId: route.routeId,
+          sourceAddress: refundAddress,
+          destinationAddress: destinationAddress,
+          refundAddress: refundAddress,
+        );
+        final memo = swap.memo;
+        if (memo == null) {
+          throw ExchangeException(
+            "SwapKit returned a memo route without a memo",
+            ExchangeExceptionType.generic,
+          );
+        }
+        // UTXO memos go in an OP_RETURN, which holds at most 80 bytes
+        final memoBytes = memo.startsWith("0x")
+            ? (memo.length - 2) ~/ 2
+            : utf8.encode(memo).length;
+        if (_utxoChains.contains(sellChain) && memoBytes > 80) {
+          throw ExchangeException(
+            "$provider's memo ($memoBytes bytes) does not fit in a "
+            "${sellChain.toUpperCase()} transaction",
+            ExchangeExceptionType.generic,
+          );
+        }
+        return (swap: swap, execution: SwapKitExecution.memo);
+
+      case SwapKitAPI.hintContractCall
+          when _contractCallChains.contains(sellChain):
+        // The call is sent from the Stack wallet that owns the refund
+        // address; SwapKit needs it to build the call (and any approval).
+        await _stackWalletIdOwning(refundAddress, provider, sellChain);
+        final swap = await SwapKitAPI.createSwap(
+          routeId: route.routeId,
+          sourceAddress: refundAddress,
+          destinationAddress: destinationAddress,
+          refundAddress: refundAddress,
+          buildTx: true,
+        );
+        if (swap.evmTx == null) {
+          throw ExchangeException(
+            "SwapKit did not return a contract call for $provider",
+            ExchangeExceptionType.generic,
+          );
+        }
+        return (swap: swap, execution: SwapKitExecution.contractCall);
+
+      default:
+        throw ExchangeException(
+          "$provider needs a kind of transaction "
+          "${AppConfig.appName} cannot send from ${sellChain.toUpperCase()}",
+          ExchangeExceptionType.generic,
+        );
+    }
+  }
+
+  // Sell chains on which Stack wallets can send more than a plain transfer.
+  static const Set<String> _utxoChains = {"BTC", "LTC", "DOGE", "DASH", "BCH"};
+  static const Set<String> _memoChains = {..._utxoChains, "SOL", "XLM"};
+  static const Set<String> _contractCallChains = {"ETH"};
+
+  /// Route kinds to request when selling [sellIdentifier]: plain transfers
+  /// always; memo routes for a memo chain's own coin; contract calls on
+  /// Ethereum (ETH and ERC-20s).
+  static List<String> _txHintsFor(String sellIdentifier) {
+    final chain = _chainOf(sellIdentifier).toUpperCase();
+    final isChainCoin = !sellIdentifier.contains("-");
+    return [
+      SwapKitAPI.hintTransfer,
+      if (isChainCoin && _memoChains.contains(chain)) SwapKitAPI.hintMemo,
+      if (_contractCallChains.contains(chain)) SwapKitAPI.hintContractCall,
+    ];
+  }
+
+  static bool _needsPsbt(SkRoute route, String sellChain) =>
+      _utxoChains.contains(sellChain) &&
+      route.providers.any((p) => p.startsWith("CHAINFLIP"));
+
+  /// The Stack wallet that owns [address]. Routes SwapKit builds a
+  /// transaction for must be sent from it.
+  static Future<String> _stackWalletIdOwning(
+    String address,
+    String provider,
+    String sellChain,
+  ) async {
+    final match = await MainDB.instance.isar.addresses
+        .filter()
+        .valueEqualTo(address, caseSensitive: false)
+        .findFirst();
+    if (match == null) {
+      throw ExchangeException(
+        "To swap with $provider, choose one of your ${AppConfig.appName} "
+        "${sellChain.toUpperCase()} wallet's addresses as the refund address. "
+        "The swap is then sent from that wallet.",
+        ExchangeExceptionType.generic,
       );
+    }
+    return match.walletId;
+  }
+
+  /// Addresses holding the wallet's spendable coins, for SwapKit to build a
+  /// PSBT from.
+  static Future<List<String>> _spendableAddresses(String walletId) async {
+    final utxos = await MainDB.instance.getUTXOs(walletId).findAll();
+    final addresses = {
+      for (final u in utxos)
+        if (!u.isBlocked && u.used != true && u.address != null) u.address!,
+    };
+    if (addresses.isEmpty) {
+      throw ExchangeException(
+        "The wallet you are swapping from has no spendable coins",
+        ExchangeExceptionType.generic,
+      );
+    }
+    return addresses.toList();
+  }
 
   /// One route per provider combination (the estimate's name is the UI's
-  /// selection key), best output first.
+  /// selection key), best output first. When a provider offers both, the
+  /// plain transfer wins over a memo / contract call route, since it can be
+  /// paid from any wallet.
   static List<SkRoute> _bestRoutePerProvider(List<SkRoute> routes) {
+    bool isTransfer(SkRoute r) =>
+        (r.txHint ?? SwapKitAPI.hintTransfer) == SwapKitAPI.hintTransfer;
     final Map<String, SkRoute> best = {};
     for (final r in routes) {
-      if ((r.txHint ?? "simpleTransfer") != "simpleTransfer") continue;
       if (r.expectedBuyAmount <= Decimal.zero) continue;
       final existing = best[r.providerKey];
       if (existing == null ||
-          r.expectedBuyAmount > existing.expectedBuyAmount) {
+          (isTransfer(r) && !isTransfer(existing)) ||
+          (isTransfer(r) == isTransfer(existing) &&
+              r.expectedBuyAmount > existing.expectedBuyAmount)) {
         best[r.providerKey] = r;
       }
     }
@@ -684,6 +881,23 @@ class SwapKitExchange extends Exchange {
     return names.isEmpty ? exchangeName : names.join(" + ");
   }
 
+  static String? _warningFor(SkRoute r) {
+    final hint = r.txHint ?? SwapKitAPI.hintTransfer;
+    final builtForWallet =
+        hint == SwapKitAPI.hintContractCall ||
+        _needsPsbt(r, _chainOf(r.sellAsset).toUpperCase());
+    final messages = [
+      if (hint != SwapKitAPI.hintTransfer)
+        "Must be sent with \"Send from ${AppConfig.appName}\" from your "
+            "${AppConfig.appName} wallet: this route needs a "
+            "${hint == SwapKitAPI.hintContractCall ? "contract call" : "memo"} "
+            "that other wallets usually cannot add."
+            "${builtForWallet ? " Use that wallet's address as the refund address." : ""}",
+      ...r.warnings,
+    ];
+    return messages.isEmpty ? null : messages.join("\n");
+  }
+
   /// Streaming and non-streaming variants share a display name, so append
   /// the variant to keep estimate names (the UI's selection key) unique.
   static String _displayName(SkRoute r) {
@@ -697,7 +911,7 @@ class SwapKitExchange extends Exchange {
   /// deposit transaction on SwapKit's tracker once its hash is known.
   static String trackingUrl(Trade trade) {
     const fallback = "https://track.swapkit.dev";
-    final chainId = _SkTradeInfo.tryParse(trade.other)?.sellChainId;
+    final chainId = SwapKitTradeInfo.tryParse(trade.other)?.sellChainId;
     if (chainId == null) return fallback;
     final hash = _depositHash(trade);
     if (hash == null) return fallback;
@@ -749,58 +963,6 @@ class SwapKitExchange extends Exchange {
         return "Failed";
       default:
         return "Waiting";
-    }
-  }
-}
-
-/// Tracking data persisted in [Trade.other] as JSON.
-class _SkTradeInfo {
-  final String routeId;
-  final String? depositChannelId;
-  final String? depositAddress;
-  final String? sellChainId;
-  final List<String> providers;
-  final DateTime? depositDeadline;
-
-  _SkTradeInfo({
-    required this.routeId,
-    required this.depositChannelId,
-    required this.depositAddress,
-    required this.sellChainId,
-    required this.providers,
-    required this.depositDeadline,
-  });
-
-  String toJsonString() => jsonEncode({
-    "swapkit": 1,
-    "routeId": routeId,
-    "depositChannelId": depositChannelId,
-    "depositAddress": depositAddress,
-    "sellChainId": sellChainId,
-    "providers": providers,
-    "depositDeadline": depositDeadline?.millisecondsSinceEpoch,
-  });
-
-  static _SkTradeInfo? tryParse(String? source) {
-    if (source == null || source.isEmpty) return null;
-    try {
-      final map = jsonDecode(source);
-      if (map is! Map || map["swapkit"] == null) return null;
-      final deadline = map["depositDeadline"];
-      return _SkTradeInfo(
-        routeId: map["routeId"] as String,
-        depositChannelId: map["depositChannelId"] as String?,
-        depositAddress: map["depositAddress"] as String?,
-        sellChainId: map["sellChainId"] as String?,
-        providers: (map["providers"] as List? ?? const [])
-            .map((e) => e.toString())
-            .toList(),
-        depositDeadline: deadline is int
-            ? DateTime.fromMillisecondsSinceEpoch(deadline, isUtc: true)
-            : null,
-      );
-    } catch (_) {
-      return null;
     }
   }
 }
