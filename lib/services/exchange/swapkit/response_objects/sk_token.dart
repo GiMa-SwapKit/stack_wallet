@@ -34,6 +34,12 @@ class SkToken {
 
   bool get isGasAsset => address == null || address!.isEmpty;
 
+  /// [address] as stored in Stack's exchange cache. Stack keeps its token
+  /// contracts in lower case and looks them up case-sensitively, so hex
+  /// addresses (EVM, Sui) are lowercased. Base58 addresses (Solana, TRON)
+  /// are case-sensitive and kept as they are.
+  String? get contractAddress => skNormalizeContract(address);
+
   factory SkToken.fromMap(Map<String, dynamic> map) => SkToken(
     chain: map["chain"] as String,
     chainId: skStringOrNull(map["chainId"]),

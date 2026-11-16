@@ -225,7 +225,7 @@ class SwapKitExchange extends Exchange {
           isAvailable: true,
           // a token on another chain (e.g. ETH on Arbitrum) is not the coin
           isStackCoin: t.isGasAsset && AppConfig.isStackCoin(t.ticker),
-          tokenContract: t.address,
+          tokenContract: t.contractAddress,
         );
         _identifiers[key] = t.identifier;
       }

@@ -92,6 +92,24 @@ void main() {
       expect(usdc.isGasAsset, isFalse);
       expect(usdc.isStablecoin, isTrue);
       expect(usdc.name, "USDC");
+      // matches Stack's lower case default token list
+      expect(
+        usdc.contractAddress,
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      );
+      expect(gas.contractAddress, isNull);
+
+      // base58 addresses are case-sensitive and must not be changed
+      final splUsdc = SkToken.fromMap({
+        "chain": "SOL",
+        "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "ticker": "USDC",
+        "identifier": "SOL.USDC-EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      });
+      expect(
+        splUsdc.contractAddress,
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      );
     });
 
     test("quote with routes and provider errors", () {

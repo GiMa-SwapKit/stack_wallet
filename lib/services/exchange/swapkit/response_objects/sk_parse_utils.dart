@@ -12,6 +12,15 @@ String? skStringOrNull(dynamic value) {
   return s.isEmpty ? null : s;
 }
 
+final _hexAddress = RegExp(r"^0[xX][0-9a-fA-F]+$");
+
+/// Lowercases hex contract addresses, which are case-insensitive. Any other
+/// format is returned unchanged.
+String? skNormalizeContract(String? address) {
+  if (address == null || address.isEmpty) return null;
+  return _hexAddress.hasMatch(address) ? address.toLowerCase() : address;
+}
+
 Map<String, dynamic>? skMapOrNull(dynamic value) =>
     value is Map ? Map<String, dynamic>.from(value) : null;
 
