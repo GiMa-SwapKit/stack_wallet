@@ -435,11 +435,14 @@ class SwapKitExchange extends Exchange {
       final info = SwapKitTradeInfo(
         routeId: swap.routeId,
         depositChannelId: swap.depositChannelId,
-        // a memo / router / PSBT target is shared by every user of the
-        // provider, so it must not be used to look this swap up
-        depositAddress: execution == SwapKitExecution.deposit
+        // a plain transfer's deposit address belongs to this swap; a memo
+        // vault or router is shared by every user of the provider, so it
+        // must not be used to look this swap up
+        depositAddress:
+            route.txHint == null || route.txHint == SwapKitAPI.hintTransfer
             ? swap.depositAddress
             : null,
+        routeHint: route.txHint ?? SwapKitAPI.hintTransfer,
         sellChainId: _chainToTrackChainId[sellChain],
         providers: swap.providers,
         depositDeadline: swap.depositChannelExpiration,
@@ -662,6 +665,14 @@ class SwapKitExchange extends Exchange {
   }
 
   /// Creates the SwapKit swap for [route] and works out how the user pays it.
+  ///
+  /// When the refund address belongs to a Stack wallet that can sign
+  /// SwapKit's prebuilt transactions (see [_prebuiltChains]), SwapKit always
+  /// builds the deposit transaction and that wallet signs it: a PSBT on UTXO
+  /// chains, an EVM transaction on Ethereum, a serialised transaction on
+  /// Solana. This holds for every route kind, plain transfers included.
+  /// Otherwise only routes that need no prebuilt transaction work: plain
+  /// deposits (paid from any wallet) and memo routes on [_selfBuiltMemoChains].
   Future<({SkSwap swap, SwapKitExecution execution})> _createSwapFor({
     required SkRoute route,
     required String sellChain,
@@ -669,7 +680,48 @@ class SwapKitExchange extends Exchange {
     required String destinationAddress,
   }) async {
     final provider = _displayName(route);
-    switch (route.txHint ?? SwapKitAPI.hintTransfer) {
+    final hint = route.txHint ?? SwapKitAPI.hintTransfer;
+
+    final walletId = _prebuiltChains.contains(sellChain)
+        ? await _stackWalletIdOrNull(refundAddress)
+        : null;
+    if (walletId != null) {
+      final isUtxo = _utxoChains.contains(sellChain);
+      try {
+        final swap = await SwapKitAPI.createSwap(
+          routeId: route.routeId,
+          // on UTXO chains SwapKit spends from all of the wallet's addresses
+          sourceAddress: isUtxo
+              ? (await _spendableAddresses(walletId)).join(";")
+              : refundAddress,
+          destinationAddress: destinationAddress,
+          refundAddress: refundAddress,
+          buildTx: true,
+          checkBalance: isUtxo,
+        );
+        final execution = isUtxo
+            ? (swap.psbt == null ? null : SwapKitExecution.psbt)
+            : (sellChain == "SOL" ? swap.solanaTx : swap.evmTx) == null
+            ? null
+            : SwapKitExecution.contractCall;
+        if (execution == null) {
+          throw ExchangeException(
+            "SwapKit did not return a transaction to sign for $provider",
+            ExchangeExceptionType.generic,
+          );
+        }
+        return (swap: swap, execution: execution);
+      } on SwapKitApiException catch (e) {
+        // A plain deposit can still be paid from another wallet, so do not
+        // block it on the refund wallet's balance.
+        if (e.errorCode != "insufficientBalance" ||
+            hint != SwapKitAPI.hintTransfer) {
+          rethrow;
+        }
+      }
+    }
+
+    switch (hint) {
       case SwapKitAPI.hintTransfer:
         final swap = await SwapKitAPI.createSwap(
           routeId: route.routeId,
@@ -686,32 +738,7 @@ class SwapKitExchange extends Exchange {
         }
         return (swap: swap, execution: SwapKitExecution.deposit);
 
-      case SwapKitAPI.hintMemo when _needsPsbt(route, sellChain):
-        // Chainflip vault swaps need a fixed output layout, so SwapKit builds
-        // the transaction from the wallet's coins and the wallet signs it.
-        final walletId = await _stackWalletIdOwning(
-          refundAddress,
-          provider,
-          sellChain,
-        );
-        final sources = await _spendableAddresses(walletId);
-        final swap = await SwapKitAPI.createSwap(
-          routeId: route.routeId,
-          sourceAddress: sources.join(";"),
-          destinationAddress: destinationAddress,
-          refundAddress: refundAddress,
-          buildTx: true,
-          checkBalance: true,
-        );
-        if (swap.psbt == null) {
-          throw ExchangeException(
-            "SwapKit did not return a transaction to sign for $provider",
-            ExchangeExceptionType.generic,
-          );
-        }
-        return (swap: swap, execution: SwapKitExecution.psbt);
-
-      case SwapKitAPI.hintMemo:
+      case SwapKitAPI.hintMemo when _selfBuiltMemoChains.contains(sellChain):
         final swap = await SwapKitAPI.createSwap(
           routeId: route.routeId,
           sourceAddress: refundAddress,
@@ -725,11 +752,11 @@ class SwapKitExchange extends Exchange {
             ExchangeExceptionType.generic,
           );
         }
-        // UTXO memos go in an OP_RETURN, which holds at most 80 bytes
+        // Bitcoin Cash memos go in an OP_RETURN, which holds at most 80 bytes
         final memoBytes = memo.startsWith("0x")
             ? (memo.length - 2) ~/ 2
             : utf8.encode(memo).length;
-        if (_utxoChains.contains(sellChain) && memoBytes > 80) {
+        if (sellChain == "BCH" && memoBytes > 80) {
           throw ExchangeException(
             "$provider's memo ($memoBytes bytes) does not fit in a "
             "${sellChain.toUpperCase()} transaction",
@@ -738,77 +765,55 @@ class SwapKitExchange extends Exchange {
         }
         return (swap: swap, execution: SwapKitExecution.memo);
 
-      case SwapKitAPI.hintContractCall
-          when _contractCallChains.contains(sellChain):
-        // The call is sent from the Stack wallet that owns the refund
-        // address; SwapKit needs it to build the call (and any approval).
-        await _stackWalletIdOwning(refundAddress, provider, sellChain);
-        final swap = await SwapKitAPI.createSwap(
-          routeId: route.routeId,
-          sourceAddress: refundAddress,
-          destinationAddress: destinationAddress,
-          refundAddress: refundAddress,
-          buildTx: true,
-        );
-        if ((sellChain == "SOL" ? swap.solanaTx : swap.evmTx) == null) {
-          throw ExchangeException(
-            "SwapKit did not return a contract call for $provider",
-            ExchangeExceptionType.generic,
-          );
-        }
-        return (swap: swap, execution: SwapKitExecution.contractCall);
-
       default:
         throw ExchangeException(
-          "$provider needs a kind of transaction "
-          "${AppConfig.appName} cannot send from ${sellChain.toUpperCase()}",
+          _prebuiltChains.contains(sellChain)
+              ? "To swap with $provider, choose one of your "
+                    "${AppConfig.appName} ${sellChain.toUpperCase()} wallet's "
+                    "addresses as the refund address. The swap is then signed "
+                    "and sent from that wallet."
+              : "$provider needs a kind of transaction "
+                    "${AppConfig.appName} cannot send from "
+                    "${sellChain.toUpperCase()}",
           ExchangeExceptionType.generic,
         );
     }
   }
 
-  // Sell chains on which Stack wallets can send more than a plain transfer.
-  static const Set<String> _utxoChains = {"BTC", "LTC", "DOGE", "DASH", "BCH"};
-  static const Set<String> _memoChains = {..._utxoChains, "SOL", "XLM"};
-  static const Set<String> _contractCallChains = {"ETH", "SOL"};
+  /// UTXO chains whose wallets sign SwapKit's PSBTs. Bitcoin Cash is not one
+  /// of them (FORKID signing), see [_selfBuiltMemoChains].
+  static const Set<String> _utxoChains = {"BTC", "LTC", "DOGE", "DASH"};
+
+  /// Sell chains whose Stack wallets sign the transactions SwapKit builds.
+  static const Set<String> _prebuiltChains = {..._utxoChains, "ETH", "SOL"};
+
+  /// Sell chains whose Stack wallets add SwapKit's memo to their own
+  /// transaction: an OP_RETURN on Bitcoin Cash, a memo on Stellar.
+  static const Set<String> _selfBuiltMemoChains = {"BCH", "XLM"};
 
   /// Route kinds to request when selling [sellIdentifier]: plain transfers
-  /// always; memo routes for a memo chain's own coin; contract calls on
-  /// Ethereum and Solana (their coin and their tokens).
+  /// always; memo routes and contract calls where a Stack wallet can send
+  /// them.
   static List<String> _txHintsFor(String sellIdentifier) {
     final chain = _chainOf(sellIdentifier).toUpperCase();
     final isChainCoin = !sellIdentifier.contains("-");
     return [
       SwapKitAPI.hintTransfer,
-      if (isChainCoin && _memoChains.contains(chain)) SwapKitAPI.hintMemo,
-      if (_contractCallChains.contains(chain)) SwapKitAPI.hintContractCall,
+      if (_utxoChains.contains(chain) ||
+          chain == "SOL" ||
+          (isChainCoin && _selfBuiltMemoChains.contains(chain)))
+        SwapKitAPI.hintMemo,
+      if (chain == "ETH" || chain == "SOL") SwapKitAPI.hintContractCall,
     ];
   }
 
-  static bool _needsPsbt(SkRoute route, String sellChain) =>
-      _utxoChains.contains(sellChain) &&
-      route.providers.any((p) => p.startsWith("CHAINFLIP"));
-
-  /// The Stack wallet that owns [address]. Routes SwapKit builds a
-  /// transaction for must be sent from it.
-  static Future<String> _stackWalletIdOwning(
-    String address,
-    String provider,
-    String sellChain,
-  ) async {
+  /// walletId of the Stack wallet that owns [address], if any.
+  static Future<String?> _stackWalletIdOrNull(String address) async {
     final match = await MainDB.instance.isar.addresses
         .filter()
         .valueEqualTo(address, caseSensitive: false)
         .findFirst();
-    if (match == null) {
-      throw ExchangeException(
-        "To swap with $provider, choose one of your ${AppConfig.appName} "
-        "${sellChain.toUpperCase()} wallet's addresses as the refund address. "
-        "The swap is then sent from that wallet.",
-        ExchangeExceptionType.generic,
-      );
-    }
-    return match.walletId;
+    return match?.walletId;
   }
 
   /// Addresses holding the wallet's spendable coins, for SwapKit to build a
@@ -885,16 +890,14 @@ class SwapKitExchange extends Exchange {
 
   static String? _warningFor(SkRoute r) {
     final hint = r.txHint ?? SwapKitAPI.hintTransfer;
-    final builtForWallet =
-        hint == SwapKitAPI.hintContractCall ||
-        _needsPsbt(r, _chainOf(r.sellAsset).toUpperCase());
+    final sellChain = _chainOf(r.sellAsset).toUpperCase();
     final messages = [
       if (hint != SwapKitAPI.hintTransfer)
         "Must be sent with \"Send from ${AppConfig.appName}\" from your "
             "${AppConfig.appName} wallet: this route needs a "
             "${hint == SwapKitAPI.hintContractCall ? "contract call" : "memo"} "
             "that other wallets usually cannot add."
-            "${builtForWallet ? " Use that wallet's address as the refund address." : ""}",
+            "${_selfBuiltMemoChains.contains(sellChain) ? "" : " Use that wallet's address as the refund address."}",
       ...r.warnings,
     ];
     return messages.isEmpty ? null : messages.join("\n");

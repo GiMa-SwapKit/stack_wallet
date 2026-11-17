@@ -32,9 +32,14 @@ abstract final class SwapKitStackSend {
     return info != null && info.execution.needsStackWallet ? info : null;
   }
 
-  /// Whether [trade] must be paid through [prepare] instead of a plain
-  /// transfer to its pay-in address.
+  /// Whether "Send from Stack" pays [trade] through [prepare] (SwapKit's
+  /// prebuilt transaction or a memo) instead of a plain transfer.
   static bool handles(Trade trade) => _info(trade) != null;
+
+  /// Whether [trade] can only be paid with "Send from Stack": a plain
+  /// transfer to the pay-in address would not pay it.
+  static bool requiresStackWallet(Trade trade) =>
+      _info(trade)?.payableFromAnyWallet == false;
 
   /// Ticker of the wallet coin [trade] is sent from. A contract call is sent
   /// from the chain's own wallet, also for a token (ERC-20 from Ethereum,
@@ -54,7 +59,7 @@ abstract final class SwapKitStackSend {
   /// transfer to the pay-in address would not pay it.
   static String? manualSendWarning(Trade trade) {
     final info = _info(trade);
-    if (info == null) return null;
+    if (info == null || info.payableFromAnyWallet) return null;
     final send = "Pay this swap with \"Send from ${AppConfig.appName}\"";
     return switch (info.execution) {
       SwapKitExecution.memo =>

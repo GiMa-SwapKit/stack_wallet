@@ -12,26 +12,28 @@ import 'dart:convert';
 import '../../../models/exchange/response_objects/trade.dart';
 import 'response_objects/sk_swap.dart';
 
-/// How the user pays a SwapKit trade.
+/// How "Send from Stack" pays a SwapKit trade.
 enum SwapKitExecution {
-  /// Plain transfer to the deposit address, from any wallet.
+  /// Plain transfer to the deposit address, built by the wallet as usual.
   deposit,
 
-  /// Transfer to the deposit address carrying [SwapKitTradeInfo.memo]
-  /// (OP_RETURN on UTXO chains, a memo on Solana/Stellar). Send from Stack.
+  /// The wallet's own transfer carrying [SwapKitTradeInfo.memo] (an
+  /// OP_RETURN on Bitcoin Cash, a memo on Stellar).
   memo,
 
   /// Sign [SwapKitTradeInfo.psbt], which SwapKit built from the wallet's
-  /// coins. Send from Stack.
+  /// coins (any route on BTC, LTC, DOGE, DASH).
   psbt,
 
-  /// A call to the provider's contract, sent from the wallet at
+  /// Sign the transaction SwapKit built for the wallet at
   /// [SwapKitTradeInfo.sourceAddress]: [SwapKitTradeInfo.evmTx] (after
-  /// [SwapKitTradeInfo.approvalTx], if any) from Ethereum, or
-  /// [SwapKitTradeInfo.solanaTx] from Solana. Send from Stack.
+  /// [SwapKitTradeInfo.approvalTx], if any) on Ethereum, or
+  /// [SwapKitTradeInfo.solanaTx] on Solana. Any route kind, from a plain
+  /// transfer to a contract call.
   contractCall;
 
-  /// Whether the trade can only be paid with "Send from Stack".
+  /// Whether Send from Stack pays the trade with SwapKit's data instead of a
+  /// plain transfer to the pay-in address.
   bool get needsStackWallet => this != deposit;
 }
 
@@ -46,6 +48,10 @@ class SwapKitTradeInfo {
   final DateTime? depositDeadline;
 
   final SwapKitExecution execution;
+
+  /// The route's `txHint`. Only a plain transfer (`simpleTransfer`) can also
+  /// be paid from another wallet.
+  final String? routeHint;
   final String? memo;
   final String? psbt;
   final SkEvmTx? evmTx;
@@ -68,6 +74,7 @@ class SwapKitTradeInfo {
     required this.providers,
     required this.depositDeadline,
     this.execution = SwapKitExecution.deposit,
+    this.routeHint,
     this.memo,
     this.psbt,
     this.evmTx,
@@ -86,6 +93,7 @@ class SwapKitTradeInfo {
     "providers": providers,
     "depositDeadline": depositDeadline?.millisecondsSinceEpoch,
     "execution": execution.name,
+    if (routeHint != null) "routeHint": routeHint,
     if (memo != null) "memo": memo,
     if (psbt != null) "psbt": psbt,
     if (evmTx != null) "evmTx": evmTx!.toMap(),
@@ -116,6 +124,7 @@ class SwapKitTradeInfo {
           (e) => e.name == map["execution"],
           orElse: () => SwapKitExecution.deposit,
         ),
+        routeHint: map["routeHint"] as String?,
         memo: map["memo"] as String?,
         psbt: map["psbt"] as String?,
         evmTx: SkEvmTx.tryParse(map["evmTx"]),
@@ -128,6 +137,13 @@ class SwapKitTradeInfo {
       return null;
     }
   }
+
+  /// Whether any wallet can pay the trade with a plain transfer to its
+  /// pay-in address (trades from before route kinds were stored: when they
+  /// were plain deposits).
+  bool get payableFromAnyWallet => routeHint == null
+      ? execution == SwapKitExecution.deposit
+      : routeHint == "simpleTransfer";
 
   /// Info of a SwapKit [trade], or null for other providers' trades.
   static SwapKitTradeInfo? of(Trade trade) =>

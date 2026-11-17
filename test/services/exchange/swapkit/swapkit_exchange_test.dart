@@ -391,6 +391,33 @@ void main() {
       )!;
       expect(old.execution, SwapKitExecution.deposit);
       expect(old.execution.needsStackWallet, isFalse);
+      expect(old.payableFromAnyWallet, isTrue);
+    });
+
+    test("prebuilt plain deposits stay payable from any wallet", () {
+      SwapKitTradeInfo info(SwapKitExecution execution, String hint) =>
+          SwapKitTradeInfo.tryParse(
+            SwapKitTradeInfo(
+              routeId: "r",
+              depositChannelId: null,
+              depositAddress: "bc1qdeposit",
+              sellChainId: "bitcoin",
+              providers: const ["NEAR"],
+              depositDeadline: null,
+              execution: execution,
+              routeHint: hint,
+              psbt: "cHNidP8BAA==",
+            ).toJsonString(),
+          )!;
+
+      // NEAR via a PSBT: Send from Stack signs it, any wallet may pay
+      final near = info(SwapKitExecution.psbt, "simpleTransfer");
+      expect(near.execution.needsStackWallet, isTrue);
+      expect(near.payableFromAnyWallet, isTrue);
+
+      // THORChain via a PSBT: only Send from Stack can pay it
+      final thor = info(SwapKitExecution.psbt, "transferWithMemo");
+      expect(thor.payableFromAnyWallet, isFalse);
     });
   });
 

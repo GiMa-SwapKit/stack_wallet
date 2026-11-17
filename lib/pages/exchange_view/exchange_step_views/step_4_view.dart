@@ -566,7 +566,9 @@ class _Step4ViewState extends ConsumerState<Step4View> {
                               const Spacer(),
                               const SizedBox(height: 12),
                               // paying the QR code would be a plain transfer
-                              if (!SwapKitStackSend.handles(model.trade!))
+                              if (!SwapKitStackSend.requiresStackWallet(
+                                model.trade!,
+                              ))
                                 PrimaryButton(
                                   label: "Show QR Code",
                                   onPressed: _showQr,
