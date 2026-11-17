@@ -28,6 +28,34 @@ void main() {
       expect(SwapKitExchange.instance.supportsExtraId, isFalse);
     });
 
+    test("sells only assets Stack can send, buys any listed asset", () {
+      for (final id in [
+        "BTC.BTC",
+        "BCH.BCH",
+        "LTC.LTC",
+        "DOGE.DOGE",
+        "DASH.DASH",
+        "ADA.ADA",
+        "XLM.XLM",
+        "ETH.ETH",
+        "ETH.USDC-0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "SOL.SOL",
+        "SOL.USDC-EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      ]) {
+        expect(SwapKitExchange.canSell(id), isTrue, reason: id);
+      }
+      for (final id in [
+        "TRON.TRX",
+        "XRP.XRP",
+        "BSC.BNB",
+        "ARB.ETH",
+        "BASE.USDC-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        "XLM.USDC-GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      ]) {
+        expect(SwapKitExchange.canSell(id), isFalse, reason: id);
+      }
+    });
+
     test("chains without prebuilt signing only get plain deposits", () {
       expect(SwapKitAPI.supportedTxHints, ["simpleTransfer"]);
     });

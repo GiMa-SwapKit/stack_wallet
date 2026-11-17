@@ -22,6 +22,7 @@ import '../../../models/isar/exchange_cache/pair.dart';
 import '../../../networking/tor_aware_network_image.dart';
 import '../../../services/exchange/exchange.dart';
 import '../../../services/exchange/exchange_data_loading_service.dart';
+import '../../../services/exchange/swapkit/swapkit_exchange.dart';
 import '../../../themes/stack_colors.dart';
 import '../../../utilities/assets.dart';
 import '../../../utilities/constants.dart';
@@ -121,6 +122,11 @@ class _ExchangeCurrencySelectionViewState
         .sortByIsStackCoin()
         .thenByName()
         .findAll();
+
+    // SwapKit can buy any listed asset, but only sell assets Stack can send.
+    if (widget.willChangeIsSend) {
+      currencies.removeWhere((e) => !SwapKitExchange.canSellCurrency(e));
+    }
 
     // If using Tor, filter exchanges which do not support Tor.
     if (Prefs.instance.useTor) {

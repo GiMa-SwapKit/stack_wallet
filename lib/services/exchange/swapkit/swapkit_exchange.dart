@@ -182,14 +182,29 @@ class SwapKitExchange extends Exchange {
     return identifier;
   }
 
-  /// Keep the list to assets that matter for Stack Wallet instead of all
-  /// ~6000 SwapKit tokens: every gas asset, every stablecoin, and ERC-20s on
-  /// Ethereum that have a CoinGecko listing (Stack supports ERC-20 tokens).
+  /// Assets to list: every chain's own coin, every stablecoin, and tokens
+  /// with a CoinGecko listing, on every chain (about 2,450 of SwapKit's
+  /// ~3,400). Unlisted tokens are left out: they include copycats reusing a
+  /// real ticker. Any listed asset can be bought (paid out to any address);
+  /// only [canSell] assets can be sold.
   static bool _include(SkToken t) =>
       !_unsupportedChains.contains(t.chain.toUpperCase()) &&
-      (t.isGasAsset ||
-          t.isStablecoin ||
-          (t.chain.toUpperCase() == "ETH" && t.coingeckoId != null));
+      (t.isGasAsset || t.isStablecoin || t.coingeckoId != null);
+
+  /// Whether Stack Wallet can sell the SwapKit asset [identifier]: a coin of
+  /// a chain whose Stack wallet signs SwapKit's transactions, or an ERC-20 or
+  /// SPL token (sent from the Ethereum or Solana wallet that owns it).
+  static bool canSell(String identifier) {
+    final chain = _chainOf(identifier).toUpperCase();
+    if (!_prebuiltChains.contains(chain)) return false;
+    final isChainCoin = !identifier.contains("-");
+    return isChainCoin || chain == "ETH" || chain == "SOL";
+  }
+
+  /// [canSell] for a cached SwapKit [currency]; true for other providers.
+  static bool canSellCurrency(Currency currency) =>
+      currency.exchangeName != exchangeName ||
+      canSell(currency.externalId ?? "");
 
   /// True only for a chain's own coin, e.g. `BTC.BTC` or `ETH.ETH`, not for
   /// ETH as the gas asset of Arbitrum, Base or Optimism.
@@ -286,6 +301,7 @@ class SwapKitExchange extends Exchange {
           ExchangeExceptionType.generic,
         );
       }
+      await _requireSellable(from, fromNetwork);
 
       final quote = fixedRate
           ? await _fixedQuote(
@@ -371,7 +387,7 @@ class SwapKitExchange extends Exchange {
       }
 
       final providerName = estimate?.exchangeProvider;
-      final sellIdentifier = await _identifierFor(from, fromNetwork);
+      final sellIdentifier = await _requireSellable(from, fromNetwork);
       final sellChain = _chainOf(sellIdentifier).toUpperCase();
 
       final picked = estimate?.rateId == null
@@ -825,6 +841,19 @@ class SwapKitExchange extends Exchange {
           SwapKitAPI.hintContractCall,
         ]
       : SwapKitAPI.supportedTxHints;
+
+  /// SwapKit identifier of the sell asset, which must be one [canSell].
+  Future<String> _requireSellable(String ticker, String? network) async {
+    final identifier = await _identifierFor(ticker, network);
+    if (!canSell(identifier)) {
+      throw ExchangeException(
+        "SwapKit swaps can only be sent from assets ${AppConfig.appName} "
+        "supports",
+        ExchangeExceptionType.generic,
+      );
+    }
+    return identifier;
+  }
 
   /// walletId of the Stack wallet that owns [address], if any.
   static Future<String?> _stackWalletIdOrNull(String address) async {
