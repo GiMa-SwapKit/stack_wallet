@@ -251,7 +251,7 @@ class SolanaWallet extends Bip39Wallet<Solana> {
       throw Exception("Insufficient SOL balance for this transaction and fee");
     }
 
-    return txData.copyWith(fee: fee, solRawTransaction: base64Transaction);
+    return txData.copyWith(fee: fee, prebuiltTransaction: base64Transaction);
   }
 
   Future<Uint8List> _latestBlockhash() async {
@@ -267,10 +267,10 @@ class SolanaWallet extends Bip39Wallet<Solana> {
     return true;
   }
 
-  /// Signs and broadcasts [TxData.solRawTransaction] with a fresh blockhash.
+  /// Signs and broadcasts [TxData.prebuiltTransaction] with a fresh blockhash.
   Future<TxData> _confirmRawTransaction(TxData txData) async {
     final keyPair = await _getKeyPair();
-    final tx = SolanaRawTransaction.fromBase64(txData.solRawTransaction!);
+    final tx = SolanaRawTransaction.fromBase64(txData.prebuiltTransaction!);
     final message = tx.withBlockhash(await _latestBlockhash());
     final signature = await keyPair.sign(message);
     final signed = SolanaRawTransaction.serialize([
@@ -325,7 +325,7 @@ class SolanaWallet extends Bip39Wallet<Solana> {
     try {
       checkClient();
 
-      if (txData.solRawTransaction != null) {
+      if (txData.prebuiltTransaction != null) {
         return await _confirmRawTransaction(txData);
       }
 

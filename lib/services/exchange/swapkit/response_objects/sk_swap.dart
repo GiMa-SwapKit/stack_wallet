@@ -84,9 +84,14 @@ class SkSwap {
   /// Base64 PSBT to sign, for UTXO routes SwapKit builds itself.
   final String? psbt;
 
-  /// Base64 serialised Solana transaction to sign, for `contractCall`
-  /// routes on Solana (e.g. Chainflip).
+  /// Base64 serialised Solana transaction to sign (`SERIALIZED_BASE64`).
   final String? solanaTx;
+
+  /// Hex CBOR Cardano transaction to sign (`CBOR`).
+  final String? cardanoTx;
+
+  /// Base64 XDR Stellar transaction envelope to sign (`STELLAR`).
+  final String? stellarTx;
 
   SkSwap({
     required this.swapId,
@@ -109,6 +114,8 @@ class SkSwap {
     this.approvalTx,
     this.psbt,
     this.solanaTx,
+    this.cardanoTx,
+    this.stellarTx,
   });
 
   factory SkSwap.fromMap(Map<String, dynamic> map) {
@@ -116,9 +123,15 @@ class SkSwap {
 
     // `targetAddress` is the documented send destination. Deposit channel
     // routes may omit it and only return `inboundAddress`.
-    final depositAddress =
+    var depositAddress =
         skStringOrNull(map["targetAddress"]) ??
         skStringOrNull(map["inboundAddress"]);
+    // Bitcoin Cash addresses sometimes come without their cashaddr prefix
+    if (depositAddress != null &&
+        (map["sellAsset"] as String).startsWith("BCH.") &&
+        !depositAddress.contains(":")) {
+      depositAddress = "bitcoincash:$depositAddress";
+    }
     if (depositAddress == null) {
       throw const FormatException(
         "SwapKit /v3/swap response has no targetAddress or inboundAddress",
@@ -139,6 +152,10 @@ class SkSwap {
               tx is String &&
               tx.isNotEmpty &&
               (map["sellAsset"] as String).startsWith("SOL.")
+          ? tx
+          : null,
+      cardanoTx: txType == "CBOR" && tx is String && tx.isNotEmpty ? tx : null,
+      stellarTx: txType == "STELLAR" && tx is String && tx.isNotEmpty
           ? tx
           : null,
       swapId: map["swapId"] as String,

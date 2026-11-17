@@ -26,8 +26,6 @@ import '../../../utilities/logger.dart';
 import '../../../utilities/paynym_is_api.dart';
 import '../../../utilities/psbt.dart';
 import '../../../utilities/tor_plain_net_option_enum.dart';
-import '../../crypto_currency/coins/bitcoincash.dart';
-import '../../crypto_currency/coins/ecash.dart';
 import '../../crypto_currency/coins/firo.dart';
 import '../../crypto_currency/coins/particl.dart';
 import '../../crypto_currency/interfaces/electrumx_currency_interface.dart';
@@ -785,12 +783,9 @@ mixin ElectrumXInterface<T extends ElectrumXCurrencyInterface>
     required String recipientAddress,
     required TxData txData,
   }) async {
-    // These coins override buildTransaction with their own signing (FORKID
-    // sighash, Particl's tx format), which _signInputs does not do.
-    if (cryptoCurrency is Bitcoincash ||
-        cryptoCurrency is Ecash ||
-        cryptoCurrency is Particl ||
-        cryptoCurrency is Firo) {
+    // Particl and Firo have their own transaction formats. Bitcoin Cash and
+    // eCash sign through BCashInterface.signPsbtTransaction (FORKID).
+    if (cryptoCurrency is Particl || cryptoCurrency is Firo) {
       throw Exception(
         "PSBT signing is not supported for ${cryptoCurrency.prettyName}",
       );
@@ -814,9 +809,8 @@ mixin ElectrumXInterface<T extends ElectrumXCurrencyInterface>
       if (psbtInput.hasSignatures) {
         throw Exception("PSBT input $i is already signed");
       }
-      // 0 = SIGHASH_DEFAULT (taproot), 1 = SIGHASH_ALL
       final sighash = psbtInput.sighashType;
-      if (sighash != null && sighash != 0 && sighash != 1) {
+      if (sighash != null && !psbtSighashTypes.contains(sighash)) {
         throw Exception("PSBT input $i asks for sighash type $sighash");
       }
 
@@ -927,82 +921,112 @@ mixin ElectrumXInterface<T extends ElectrumXCurrencyInterface>
     );
 
     // ---- sign with the wallet's keys, keeping the PSBT's tx as is
-    final inputsWithKeys = await addSigningKeys(inputs);
-    final List<coinlib.Output> prevOuts = [];
-    final List<InputV2> tempInputs = [];
-    coinlib.Transaction clTx = coinlib.Transaction(
-      version: psbt.version,
-      locktime: psbt.locktime,
-      inputs: [],
-      outputs: outputs,
-    );
-    BigInt inputTotal = BigInt.zero;
-    for (int i = 0; i < inputsWithKeys.length; i++) {
-      final data = inputsWithKeys[i] as StandardInput;
-      final sequence = psbt.outPoints[i].sequence;
-      inputTotal += data.value;
-      prevOuts.add(
-        coinlib.Output.fromAddress(
-          data.value,
-          coinlib.Address.fromString(data.utxo.address!, net),
-        ),
-      );
-      final input = standardInputToCoinlibInput(data, sequence: sequence);
-      clTx = clTx.addInput(input);
-      tempInputs.add(
-        InputV2.isarCantDoRequiredInDefaultConstructor(
-          scriptSigHex: input.scriptSig.toHex,
-          scriptSigAsm: null,
-          sequence: sequence,
-          outpoint: OutpointV2.isarCantDoRequiredInDefaultConstructor(
-            txid: data.utxo.txid,
-            vout: data.utxo.vout,
-          ),
-          addresses: [data.utxo.address!],
-          valueStringSats: data.utxo.value.toString(),
-          witness: null,
-          innerRedeemScriptAsm: null,
-          coinbase: null,
-          walletOwns: true,
-        ),
-      );
-    }
-
-    final outputTotal = outputs.fold(
+    final inputsWithKeys = (await addSigningKeys(inputs)).cast<StandardInput>();
+    final inputTotal = inputsWithKeys.fold(
       BigInt.zero,
       (sum, e) => sum + e.value,
     );
+    final outputTotal = outputs.fold(BigInt.zero, (sum, e) => sum + e.value);
     final fee = inputTotal - outputTotal;
     if (fee <= BigInt.zero) {
       throw Exception("PSBT outputs exceed its inputs");
     }
 
-    clTx = _signInputs(
-      clTx: clTx,
+    final signed = await signPsbtTransaction(
+      version: psbt.version,
+      locktime: psbt.locktime,
       inputsWithKeys: inputsWithKeys,
-      prevOuts: prevOuts,
+      sequences: [for (final o in psbt.outPoints) o.sequence],
+      outputs: outputs,
     );
 
+    final tempInputs = [
+      for (int i = 0; i < inputsWithKeys.length; i++)
+        InputV2.isarCantDoRequiredInDefaultConstructor(
+          scriptSigHex: null,
+          scriptSigAsm: null,
+          sequence: psbt.outPoints[i].sequence,
+          outpoint: OutpointV2.isarCantDoRequiredInDefaultConstructor(
+            txid: inputsWithKeys[i].utxo.txid,
+            vout: inputsWithKeys[i].utxo.vout,
+          ),
+          addresses: [inputsWithKeys[i].utxo.address!],
+          valueStringSats: inputsWithKeys[i].utxo.value.toString(),
+          witness: null,
+          innerRedeemScriptAsm: null,
+          coinbase: null,
+          walletOwns: true,
+        ),
+    ];
+
     return txData.copyWith(
-      raw: clTx.toHex(),
-      vSize: this is PeercoinWallet ? clTx.size : clTx.vSize(),
+      raw: signed.hex,
+      vSize: signed.vSize,
       fee: Amount(rawValue: fee, fractionDigits: cryptoCurrency.fractionDigits),
       recipients: recipients,
       usedUTXOs: inputsWithKeys,
       tempTx: TransactionV2(
         walletId: walletId,
         blockHash: null,
-        hash: clTx.hashHex,
-        txid: clTx.txid,
+        hash: signed.hash,
+        txid: signed.txid,
         height: null,
         timestamp: DateTime.timestamp().millisecondsSinceEpoch ~/ 1000,
         inputs: List.unmodifiable(tempInputs),
         outputs: List.unmodifiable(tempOutputs),
-        version: clTx.version,
+        version: psbt.version,
         type: TransactionType.outgoing,
         subType: TransactionSubType.none,
         otherData: null,
       ),
+    );
+  }
+
+  /// Sighash types a PSBT may ask for: SIGHASH_DEFAULT (taproot) and
+  /// SIGHASH_ALL.
+  @protected
+  Set<int> get psbtSighashTypes => const {0, 1};
+
+  /// Builds the PSBT's transaction from [inputsWithKeys] (with [sequences])
+  /// and [outputs] as given, and signs every input.
+  @protected
+  Future<({String hex, int vSize, String txid, String hash})>
+  signPsbtTransaction({
+    required int version,
+    required int locktime,
+    required List<StandardInput> inputsWithKeys,
+    required List<int> sequences,
+    required List<coinlib.Output> outputs,
+  }) async {
+    final net = cryptoCurrency.networkParams;
+    coinlib.Transaction clTx = coinlib.Transaction(
+      version: version,
+      locktime: locktime,
+      inputs: [
+        for (int i = 0; i < inputsWithKeys.length; i++)
+          standardInputToCoinlibInput(
+            inputsWithKeys[i],
+            sequence: sequences[i],
+          ),
+      ],
+      outputs: outputs,
+    );
+    clTx = _signInputs(
+      clTx: clTx,
+      inputsWithKeys: inputsWithKeys,
+      prevOuts: [
+        for (final d in inputsWithKeys)
+          coinlib.Output.fromAddress(
+            d.value,
+            coinlib.Address.fromString(d.utxo.address!, net),
+          ),
+      ],
+    );
+    return (
+      hex: clTx.toHex(),
+      vSize: this is PeercoinWallet ? clTx.size : clTx.vSize(),
+      txid: clTx.txid,
+      hash: clTx.hashHex,
     );
   }
 
@@ -1169,10 +1193,9 @@ mixin ElectrumXInterface<T extends ElectrumXCurrencyInterface>
       );
     }
 
-    // Add OP_RETURN output if provided (Rosen Bridge on Firo, swap provider
-    // memos such as THORChain/Maya on the other UTXO coins). The send screen
-    // still only lets users enter OP_RETURN data manually on Firo.
-    if (!txData.type.isMweb() &&
+    // Add OP_RETURN output if provided (for Rosen Bridge and other protocols)
+    // Currently only supported for Firo
+    if (cryptoCurrency is Firo &&
         txData.opReturnData != null &&
         txData.opReturnData!.isNotEmpty) {
       try {

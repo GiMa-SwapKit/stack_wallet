@@ -7,78 +7,70 @@
  *
  */
 
-import 'dart:convert';
-import 'dart:typed_data';
-
 import '../../../app_config.dart';
 import '../../../models/exchange/response_objects/trade.dart';
 import '../../../utilities/amount/amount.dart';
 import '../../../utilities/enums/fee_rate_type_enum.dart';
 import '../../../utilities/extensions/extensions.dart';
-import '../../../wallets/crypto_currency/crypto_currency.dart';
 import '../../../wallets/models/tx_data.dart';
+import '../../../wallets/wallet/impl/cardano_wallet.dart';
 import '../../../wallets/wallet/impl/ethereum_wallet.dart';
 import '../../../wallets/wallet/impl/solana_wallet.dart';
+import '../../../wallets/wallet/impl/stellar_wallet.dart';
 import '../../../wallets/wallet/wallet.dart';
 import '../../../wallets/wallet/wallet_mixin_interfaces/electrumx_interface.dart';
 import 'swapkit_trade_info.dart';
 
-/// "Send from Stack" for SwapKit trades that are more than a plain transfer
-/// to a deposit address: memo deposits, PSBTs SwapKit built for the wallet,
-/// and EVM contract calls (see [SwapKitExecution]).
+/// "Send from Stack" for SwapKit trades: signs the transaction SwapKit built
+/// for the wallet (see [SwapKitExecution]). Stack never builds its own
+/// transaction for a SwapKit trade.
 abstract final class SwapKitStackSend {
   static SwapKitTradeInfo? _info(Trade trade) {
     final info = SwapKitTradeInfo.of(trade);
-    return info != null && info.execution.needsStackWallet ? info : null;
+    return info != null && info.execution.isPrebuilt ? info : null;
   }
 
-  /// Whether "Send from Stack" pays [trade] through [prepare] (SwapKit's
-  /// prebuilt transaction or a memo) instead of a plain transfer.
+  /// Whether "Send from Stack" pays [trade] with SwapKit's prebuilt
+  /// transaction through [prepare].
   static bool handles(Trade trade) => _info(trade) != null;
+
+  /// Whether "Send from Stack" may be offered for [trade]. A SwapKit trade
+  /// without a prebuilt transaction (refund address outside Stack) is paid
+  /// from another wallet instead. Other providers' trades are unaffected.
+  static bool sendFromStackAllowed(Trade trade) {
+    final info = SwapKitTradeInfo.of(trade);
+    return info == null || info.execution.isPrebuilt;
+  }
 
   /// Whether [trade] can only be paid with "Send from Stack": a plain
   /// transfer to the pay-in address would not pay it.
   static bool requiresStackWallet(Trade trade) =>
       _info(trade)?.payableFromAnyWallet == false;
 
-  /// Ticker of the wallet coin [trade] is sent from. A contract call is sent
-  /// from the chain's own wallet, also for a token (ERC-20 from Ethereum,
-  /// SPL from Solana), since that wallet owns the tokens and pays the fee.
-  static String walletTicker(Trade trade) {
-    final info = _info(trade);
-    if (info?.execution != SwapKitExecution.contractCall) {
-      return trade.payInCurrency;
-    }
-    return _isSolana(info!) ? "SOL" : "ETH";
-  }
-
-  static bool _isSolana(SwapKitTradeInfo info) =>
-      info.sellChainId == "solana" || info.solanaTx != null;
+  /// Ticker of the wallet coin [trade] is sent from. Tokens are sent from
+  /// their chain's wallet (ERC-20 from Ethereum, SPL from Solana), which owns
+  /// them and pays the fee.
+  static String walletTicker(Trade trade) => switch (_info(trade)?.execution) {
+    SwapKitExecution.evm => "ETH",
+    SwapKitExecution.solana => "SOL",
+    _ => trade.payInCurrency,
+  };
 
   /// Warning to show next to the pay-in details of [trade], if a plain
   /// transfer to the pay-in address would not pay it.
   static String? manualSendWarning(Trade trade) {
     final info = _info(trade);
     if (info == null || info.payableFromAnyWallet) return null;
-    final send = "Pay this swap with \"Send from ${AppConfig.appName}\"";
-    return switch (info.execution) {
-      SwapKitExecution.memo =>
-        "$send. The deposit must carry the memo shown; a transfer without "
-            "it is not credited to the swap.",
-      SwapKitExecution.psbt =>
-        "$send, from the wallet whose address you gave as refund address. "
-            "The deposit is a transaction prepared for that wallet's coins; "
-            "do not send to this address from another wallet.",
-      SwapKitExecution.contractCall =>
-        "$send, from the ${_isSolana(info) ? "Solana" : "Ethereum"} wallet "
-            "${info.sourceAddress ?? ""}. "
-            "The deposit is a call to the provider's contract; do not send "
-            "coins to this address directly.",
-      SwapKitExecution.deposit => null,
-    };
+    final from = info.sourceAddress == null
+        ? "the wallet whose address you gave as refund address"
+        : "the wallet ${info.sourceAddress}";
+    return "Pay this swap with \"Send from ${AppConfig.appName}\", from "
+        "$from. The deposit is a transaction prepared for that wallet; "
+        "coins sent to this address any other way are not credited to the "
+        "swap.";
   }
 
-  /// Builds the transaction paying [trade] from [wallet], ready for the
+  /// Prepares SwapKit's transaction for [trade] in [wallet], ready for the
   /// usual confirm screen. [amount] is the trade's pay-in amount.
   static Future<TxData> prepare({
     required Trade trade,
@@ -87,7 +79,7 @@ abstract final class SwapKitStackSend {
   }) async {
     final info = _info(trade);
     if (info == null) {
-      throw StateError("Not a SwapKit Send from Stack trade");
+      throw StateError("Not a SwapKit trade with a prebuilt transaction");
     }
     final coin = wallet.cryptoCurrency;
     final note =
@@ -95,36 +87,33 @@ abstract final class SwapKitStackSend {
         "${trade.payOutCurrency.toUpperCase()} exchange";
     final address = trade.payInAddress;
 
-    switch (info.execution) {
-      case SwapKitExecution.memo:
-        final recipient = TxRecipient(
+    // account chains: the transaction was built for one address
+    final source = info.sourceAddress;
+    if (source != null) {
+      final myAddress = (await wallet.getCurrentReceivingAddress())!.value;
+      // hex (EVM) addresses are case-insensitive, the others are not
+      final same = source.startsWith("0x")
+          ? myAddress.toLowerCase() == source.toLowerCase()
+          : myAddress == source;
+      if (!same) {
+        throw Exception("Send this swap from the wallet $source");
+      }
+    }
+
+    TxData toDeposit(Amount value) => TxData(
+      recipients: [
+        TxRecipient(
           address: address,
-          amount: amount,
+          amount: value,
           isChange: false,
           addressType: coin.getAddressType(address)!,
-        );
-        if (wallet is ElectrumXInterface) {
-          return wallet.prepareSend(
-            txData: TxData(
-              recipients: [recipient],
-              opReturnData: memoToOpReturnHex(info.memo!),
-              feeRateType: FeeRateType.average,
-              note: note,
-            ),
-          );
-        }
-        if (coin is Solana || coin is Stellar) {
-          return wallet.prepareSend(
-            txData: TxData(
-              recipients: [recipient],
-              memo: info.memo,
-              feeRateType: FeeRateType.average,
-              note: note,
-            ),
-          );
-        }
-        throw Exception("${coin.prettyName} wallets cannot send a swap memo");
+        ),
+      ],
+      feeRateType: FeeRateType.average,
+      note: note,
+    );
 
+    switch (info.execution) {
       case SwapKitExecution.psbt:
         if (wallet is! ElectrumXInterface) {
           throw Exception(
@@ -143,45 +132,7 @@ abstract final class SwapKitStackSend {
         );
         return txData;
 
-      case SwapKitExecution.contractCall:
-        final chainName = _isSolana(info) ? "Solana" : "Ethereum";
-        final myAddress = (await wallet.getCurrentReceivingAddress())!.value;
-        final source = info.sourceAddress;
-        // hex (EVM) addresses are case-insensitive, base58 (Solana) are not
-        final sameAddress = source == null
-            ? true
-            : source.startsWith("0x")
-            ? myAddress.toLowerCase() == source.toLowerCase()
-            : myAddress == source;
-        if (!sameAddress) {
-          throw Exception("Send this swap from the $chainName wallet $source");
-        }
-
-        if (_isSolana(info)) {
-          if (wallet is! SolanaWallet || info.solanaTx == null) {
-            throw Exception("Send this swap from a Solana wallet");
-          }
-          // SOL moved by the program call; a token swap moves no SOL
-          final sellsSol =
-              info.sellAsset == null || info.sellAsset == "SOL.SOL";
-          return wallet.prepareSerializedTransaction(
-            base64Transaction: info.solanaTx!,
-            txData: TxData(
-              recipients: [
-                TxRecipient(
-                  address: address,
-                  amount: sellsSol
-                      ? amount
-                      : Amount.zeroWith(fractionDigits: coin.fractionDigits),
-                  isChange: false,
-                  addressType: coin.getAddressType(address)!,
-                ),
-              ],
-              note: note,
-            ),
-          );
-        }
-
+      case SwapKitExecution.evm:
         if (wallet is! EthereumWallet) {
           throw Exception("Send this swap from an Ethereum wallet");
         }
@@ -214,16 +165,43 @@ abstract final class SwapKitStackSend {
                 ),
         );
 
+      case SwapKitExecution.solana:
+        if (wallet is! SolanaWallet) {
+          throw Exception("Send this swap from a Solana wallet");
+        }
+        // SOL moved by the transaction; a token swap moves no SOL
+        final sellsSol = info.sellAsset == null || info.sellAsset == "SOL.SOL";
+        return wallet.prepareSerializedTransaction(
+          base64Transaction: info.solanaTx!,
+          txData: toDeposit(
+            sellsSol
+                ? amount
+                : Amount.zeroWith(fractionDigits: coin.fractionDigits),
+          ),
+        );
+
+      case SwapKitExecution.cardano:
+        if (wallet is! CardanoWallet) {
+          throw Exception("Send this swap from a Cardano wallet");
+        }
+        return wallet.prepareSerializedTransaction(
+          cborHex: info.cardanoTx!,
+          txData: toDeposit(amount),
+        );
+
+      case SwapKitExecution.stellar:
+        if (wallet is! StellarWallet) {
+          throw Exception("Send this swap from a Stellar wallet");
+        }
+        return wallet.prepareSerializedTransaction(
+          envelopeXdr: info.stellarTx!,
+          txData: toDeposit(amount),
+        );
+
       case SwapKitExecution.deposit:
-        throw StateError("Plain deposits use the normal send flow");
+        throw StateError("Plain deposits are not sent from Stack");
     }
   }
-
-  /// OP_RETURN payload of a swap memo: `0x…` memos are raw bytes (Chainflip
-  /// vault swap parameters), others are text (THORChain, Maya, Harbor).
-  static String memoToOpReturnHex(String memo) => memo.startsWith("0x")
-      ? memo.substring(2).toLowerCase()
-      : Uint8List.fromList(utf8.encode(memo)).toHex;
 
   /// A PSBT must pay exactly the swap amount to the deposit address, and its
   /// network fee must stay sane (at most 10% of the amount).

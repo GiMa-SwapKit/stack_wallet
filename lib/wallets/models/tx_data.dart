@@ -82,10 +82,11 @@ class TxData {
   /// [web3dartTransaction] (nonce - 1), e.g. for a swap router contract call.
   final web3dart.Transaction? ethApprovalTransaction;
 
-  /// Solana: a serialised transaction built by someone else (e.g. a swap
-  /// provider), base64, signed and broadcast as is apart from a fresh
-  /// blockhash.
-  final String? solRawTransaction;
+  /// A transaction someone else built for this wallet (e.g. a swap
+  /// provider), signed and broadcast by confirmSend: base64 on Solana (with a
+  /// fresh blockhash), CBOR hex on Cardano, base64 XDR on Stellar (with a
+  /// fresh sequence number).
+  final String? prebuiltTransaction;
   final int? nonce;
   final BigInt? chainId;
 
@@ -161,7 +162,7 @@ class TxData {
     this.ethEIP1559Fee,
     this.web3dartTransaction,
     this.ethApprovalTransaction,
-    this.solRawTransaction,
+    this.prebuiltTransaction,
     this.nonce,
     this.chainId,
     this.solInstructions,
@@ -312,7 +313,7 @@ class TxData {
     EthEIP1559Fee? ethEIP1559Fee,
     web3dart.Transaction? web3dartTransaction,
     web3dart.Transaction? ethApprovalTransaction,
-    String? solRawTransaction,
+    String? prebuiltTransaction,
     int? nonce,
     BigInt? chainId,
     List<Instruction>? solInstructions,
@@ -370,7 +371,7 @@ class TxData {
       web3dartTransaction: web3dartTransaction ?? this.web3dartTransaction,
       ethApprovalTransaction:
           ethApprovalTransaction ?? this.ethApprovalTransaction,
-      solRawTransaction: solRawTransaction ?? this.solRawTransaction,
+      prebuiltTransaction: prebuiltTransaction ?? this.prebuiltTransaction,
       nonce: nonce ?? this.nonce,
       chainId: chainId ?? this.chainId,
       solInstructions: solInstructions ?? this.solInstructions,
@@ -422,7 +423,7 @@ class TxData {
       'ethEIP1559Fee: $ethEIP1559Fee, '
       'web3dartTransaction: $web3dartTransaction, '
       'ethApprovalTransaction: $ethApprovalTransaction, '
-      'solRawTransaction: $solRawTransaction, '
+      'prebuiltTransaction: $prebuiltTransaction, '
       'nonce: $nonce, '
       'chainId: $chainId, '
       'solInstructions: $solInstructions, '

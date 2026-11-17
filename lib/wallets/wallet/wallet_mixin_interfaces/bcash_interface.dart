@@ -1,5 +1,6 @@
 import 'package:bitbox/bitbox.dart' as bitbox;
 import 'package:bitbox/src/utils/network.dart' as bitbox_utils;
+import 'package:coinlib_flutter/coinlib_flutter.dart' as coinlib;
 import 'package:isar_community/isar.dart';
 
 import '../../../models/input.dart';
@@ -7,8 +8,6 @@ import '../../../models/isar/models/blockchain_data/v2/input_v2.dart';
 import '../../../models/isar/models/blockchain_data/v2/output_v2.dart';
 import '../../../models/isar/models/blockchain_data/v2/transaction_v2.dart';
 import '../../../models/isar/models/isar_models.dart';
-import '../../../utilities/address_utils.dart';
-import '../../../utilities/extensions/extensions.dart';
 import '../../../utilities/logger.dart';
 import '../../crypto_currency/interfaces/electrumx_currency_interface.dart';
 import '../../models/tx_data.dart';
@@ -17,6 +16,61 @@ import 'electrumx_interface.dart';
 
 mixin BCashInterface<T extends ElectrumXCurrencyInterface>
     on Bip39HDWallet<T>, ElectrumXInterface<T> {
+  bitbox.ECPair _ecPair(StandardInput input) => bitbox.ECPair.fromPrivateKey(
+    input.key!.privateKey!.data,
+    network: bitbox_utils.Network(
+      cryptoCurrency.networkParams.privHDPrefix,
+      cryptoCurrency.networkParams.pubHDPrefix,
+      cryptoCurrency.network.isTestNet,
+      cryptoCurrency.networkParams.p2pkhPrefix,
+      cryptoCurrency.networkParams.wifPrefix,
+      cryptoCurrency.networkParams.p2pkhPrefix,
+    ),
+    compressed: input.key!.privateKey!.compressed,
+  );
+
+  /// SIGHASH_ALL | SIGHASH_FORKID, the only type bitbox signs with.
+  @override
+  Set<int> get psbtSighashTypes => const {0x41};
+
+  /// Signs a PSBT's transaction with FORKID (BIP143 style) sighashes, which
+  /// coinlib does not do.
+  @override
+  Future<({String hex, int vSize, String txid, String hash})>
+  signPsbtTransaction({
+    required int version,
+    required int locktime,
+    required List<StandardInput> inputsWithKeys,
+    required List<int> sequences,
+    required List<coinlib.Output> outputs,
+  }) async {
+    final builder = bitbox.Bitbox.transactionBuilder(
+      testnet: cryptoCurrency.network.isTestNet,
+    );
+    builder.setVersion(version);
+    builder.setLockTime(locktime);
+    for (int i = 0; i < inputsWithKeys.length; i++) {
+      builder.addInput(
+        inputsWithKeys[i].utxo.txid,
+        inputsWithKeys[i].utxo.vout,
+        sequences[i],
+      );
+    }
+    for (final output in outputs) {
+      builder.addOutput(output.scriptPubKey, output.value.toInt());
+    }
+    for (int i = 0; i < inputsWithKeys.length; i++) {
+      builder.sign(i, _ecPair(inputsWithKeys[i]), inputsWithKeys[i].utxo.value);
+    }
+    final tx = builder.build();
+    return (
+      hex: tx.toHex(),
+      vSize: tx.virtualSize(),
+      txid: tx.getId(),
+      hash: tx.getId(),
+    );
+  }
+
   @override
   Future<TxData> buildTransaction({
     required TxData txData,
@@ -91,37 +145,10 @@ mixin BCashInterface<T extends ElectrumXCurrencyInterface>
       );
     }
 
-    // OP_RETURN output, e.g. a THORChain swap memo
-    if (txData.opReturnData != null && txData.opReturnData!.isNotEmpty) {
-      final script = AddressUtils.opReturnScriptFromHex(txData.opReturnData!);
-      builder.addOutput(script, 0);
-      tempOutputs.add(
-        OutputV2.isarCantDoRequiredInDefaultConstructor(
-          scriptPubKeyHex: script.toHex,
-          valueStringSats: "0",
-          addresses: [],
-          walletOwns: false,
-        ),
-      );
-    }
-
     try {
       // Sign the transaction accordingly
       for (int i = 0; i < insAndKeys.length; i++) {
-        final bitboxEC = bitbox.ECPair.fromPrivateKey(
-          insAndKeys[i].key!.privateKey!.data,
-          network: bitbox_utils.Network(
-            cryptoCurrency.networkParams.privHDPrefix,
-            cryptoCurrency.networkParams.pubHDPrefix,
-            cryptoCurrency.network.isTestNet,
-            cryptoCurrency.networkParams.p2pkhPrefix,
-            cryptoCurrency.networkParams.wifPrefix,
-            cryptoCurrency.networkParams.p2pkhPrefix,
-          ),
-          compressed: insAndKeys[i].key!.privateKey!.compressed,
-        );
-
-        builder.sign(i, bitboxEC, insAndKeys[i].utxo.value);
+        builder.sign(i, _ecPair(insAndKeys[i]), insAndKeys[i].utxo.value);
       }
     } catch (e, s) {
       Logging.instance.e(

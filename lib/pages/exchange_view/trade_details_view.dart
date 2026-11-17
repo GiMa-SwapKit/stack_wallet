@@ -208,6 +208,7 @@ class _TradeDetailsViewState extends ConsumerState<TradeDetailsView> {
 
     final showSendFromStackButton =
         !hasTx &&
+        SwapKitStackSend.sendFromStackAllowed(trade) &&
         AppConfig.isStackCoin(walletTicker) &&
         Util.isWalletCoinAndCanSendWithoutWalletOpenedIgnoringXMR(
           walletTicker,

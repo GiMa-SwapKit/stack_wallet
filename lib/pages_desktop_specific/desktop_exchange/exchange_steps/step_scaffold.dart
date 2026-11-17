@@ -277,6 +277,8 @@ class _StepScaffoldState extends ConsumerState<StepScaffold> {
       canSendFromStack = true;
     } else {
       canSendFromStack =
+          (model?.trade == null ||
+              SwapKitStackSend.sendFromStackAllowed(model!.trade!)) &&
           Util.isWalletCoinAndCanSendWithoutWalletOpenedIgnoringXMR(
             model?.trade != null && SwapKitStackSend.handles(model!.trade!)
                 ? SwapKitStackSend.walletTicker(model.trade!)

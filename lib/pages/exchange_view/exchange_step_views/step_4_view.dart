@@ -156,6 +156,7 @@ class _Step4ViewState extends ConsumerState<Step4View> {
     clipboard = widget.clipboard;
 
     isWalletCoinAndCanSend =
+        SwapKitStackSend.sendFromStackAllowed(model.trade!) &&
         Util.isWalletCoinAndCanSendWithoutWalletOpenedIgnoringXMR(
           SwapKitStackSend.walletTicker(model.trade!),
           ref.read(pWallets).wallets,

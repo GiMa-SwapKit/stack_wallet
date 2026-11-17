@@ -11,7 +11,6 @@ import 'package:stackwallet/services/exchange/swapkit/swapkit_api.dart';
 import 'package:stackwallet/services/exchange/swapkit/swapkit_exchange.dart';
 import 'package:stackwallet/services/exchange/swapkit/swapkit_stack_send.dart';
 import 'package:stackwallet/services/exchange/swapkit/swapkit_trade_info.dart';
-import 'package:stackwallet/utilities/address_utils.dart';
 import 'package:stackwallet/utilities/amount/amount.dart';
 
 void main() {
@@ -29,7 +28,7 @@ void main() {
       expect(SwapKitExchange.instance.supportsExtraId, isFalse);
     });
 
-    test("only requests plain deposit-address routes", () {
+    test("chains without prebuilt signing only get plain deposits", () {
       expect(SwapKitAPI.supportedTxHints, ["simpleTransfer"]);
     });
 
@@ -344,7 +343,7 @@ void main() {
           sellChainId: "solana",
           providers: const ["CHAINFLIP"],
           depositDeadline: null,
-          execution: SwapKitExecution.contractCall,
+          execution: SwapKitExecution.solana,
           solanaTx: swap.solanaTx,
           sellAsset: "SOL.USDC-EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
           sourceAddress: "stnkw",
@@ -352,6 +351,48 @@ void main() {
       )!;
       expect(info.solanaTx, "AQAAAA==");
       expect(info.sellAsset, startsWith("SOL.USDC-"));
+    });
+
+    test("swap with Cardano, Stellar and Bitcoin Cash prebuilt txs", () {
+      final ada = SkSwap.fromMap({
+        ...swapBase,
+        "sellAsset": "ADA.ADA",
+        "txHint": "simpleTransfer",
+        "txType": "CBOR",
+        "tx": "84a40086825820d6",
+        "targetAddress":
+            "addr1v96vdwc0sqa42wvqrd50evkcdgv3f93rf7zpc9snqn64hvq32xdcl",
+      });
+      expect(ada.cardanoTx, "84a40086825820d6");
+      expect(ada.stellarTx, isNull);
+
+      final xlm = SkSwap.fromMap({
+        ...swapBase,
+        "sellAsset": "XLM.XLM",
+        "txHint": "transferWithMemo",
+        "txType": "STELLAR",
+        "tx": "AAAAAgAAAAAoD919",
+        "memo": "242482172",
+        "targetAddress":
+            "GDJ4JZXZELZD737NVFORH4PSSQDWFDZTKW3AIDKHYQG23ZXBPDGGQBJK",
+      });
+      expect(xlm.stellarTx, "AAAAAgAAAAAoD919");
+      expect(xlm.cardanoTx, isNull);
+
+      // THORChain returns Bitcoin Cash vaults without the cashaddr prefix
+      final bch = SkSwap.fromMap({
+        ...swapBase,
+        "sellAsset": "BCH.BCH",
+        "txHint": "transferWithMemo",
+        "txType": "PSBT",
+        "tx": "cHNidP8BAA==",
+        "targetAddress": "qzat5qhem4xrcy6k20k2v8l837wt5rvrnykj63fjv5",
+      });
+      expect(
+        bch.depositAddress,
+        "bitcoincash:qzat5qhem4xrcy6k20k2v8l837wt5rvrnykj63fjv5",
+      );
+      expect(bch.psbt, "cHNidP8BAA==");
     });
 
     test("trade info round trip", () {
@@ -362,7 +403,7 @@ void main() {
         sellChainId: "1",
         providers: const ["CHAINFLIP"],
         depositDeadline: null,
-        execution: SwapKitExecution.contractCall,
+        execution: SwapKitExecution.evm,
         evmTx: SkEvmTx(
           to: "0xrouter",
           value: BigInt.from(500),
@@ -378,8 +419,8 @@ void main() {
         sourceAddress: "0xsource",
       );
       final back = SwapKitTradeInfo.tryParse(info.toJsonString())!;
-      expect(back.execution, SwapKitExecution.contractCall);
-      expect(back.execution.needsStackWallet, isTrue);
+      expect(back.execution, SwapKitExecution.evm);
+      expect(back.execution.isPrebuilt, isTrue);
       expect(back.evmTx!.value, BigInt.from(500));
       expect(back.evmTx!.gasLimit, 161174);
       expect(back.approvalTx!.to, "0xtoken");
@@ -390,7 +431,7 @@ void main() {
         '{"swapkit":1,"routeId":"r","depositAddress":"bc1q"}',
       )!;
       expect(old.execution, SwapKitExecution.deposit);
-      expect(old.execution.needsStackWallet, isFalse);
+      expect(old.execution.isPrebuilt, isFalse);
       expect(old.payableFromAnyWallet, isTrue);
     });
 
@@ -412,7 +453,7 @@ void main() {
 
       // NEAR via a PSBT: Send from Stack signs it, any wallet may pay
       final near = info(SwapKitExecution.psbt, "simpleTransfer");
-      expect(near.execution.needsStackWallet, isTrue);
+      expect(near.execution.isPrebuilt, isTrue);
       expect(near.payableFromAnyWallet, isTrue);
 
       // THORChain via a PSBT: only Send from Stack can pay it
@@ -422,33 +463,6 @@ void main() {
   });
 
   group("SwapKit Send from Stack", () {
-    test("memo to OP_RETURN payload", () {
-      // text memos (THORChain, Maya, Harbor) are UTF-8
-      expect(SwapKitStackSend.memoToOpReturnHex("=:e:0x1"), "3d3a653a307831");
-      // 0x memos (Chainflip vault swaps) are raw bytes
-      expect(SwapKitStackSend.memoToOpReturnHex("0x0101FA"), "0101fa");
-    });
-
-    test("OP_RETURN script", () {
-      expect(AddressUtils.opReturnScriptFromHex("0101fa"), [
-        0x6a,
-        3,
-        1,
-        1,
-        0xfa,
-      ]);
-      final long = "ab" * 76;
-      expect(AddressUtils.opReturnScriptFromHex(long).sublist(0, 3), [
-        0x6a,
-        0x4c,
-        76,
-      ]);
-      expect(
-        () => AddressUtils.opReturnScriptFromHex("ab" * 81),
-        throwsFormatException,
-      );
-    });
-
     test("PSBT payment checks", () {
       Amount sats(int v) => Amount(rawValue: BigInt.from(v), fractionDigits: 8);
 

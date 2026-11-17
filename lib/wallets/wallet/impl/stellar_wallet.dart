@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:decimal/decimal.dart';
 import 'package:isar_community/isar.dart';
 import 'package:mutex/mutex.dart';
 import 'package:socks5_proxy/socks.dart';
@@ -273,8 +274,114 @@ class StellarWallet extends Bip39Wallet<Stellar> {
     }
   }
 
+  /// Prepares a transaction someone else built for this wallet, e.g. a swap
+  /// provider's deposit ([envelopeXdr], a base64 transaction envelope).
+  ///
+  /// [txData] has one recipient: the deposit address and the exact amount it
+  /// must receive. The transaction must come from this account, carry no
+  /// signatures yet, and do nothing but native payments that add up to that
+  /// amount, to that address. Its memo is kept as built.
+  Future<TxData> prepareSerializedTransaction({
+    required String envelopeXdr,
+    required TxData txData,
+  }) async {
+    final built = stellar.AbstractTransaction.fromEnvelopeXdrString(
+      envelopeXdr,
+    );
+    if (built is! stellar.Transaction) {
+      throw Exception("Fee bump transactions are not supported");
+    }
+    final keyPair = await _getSenderKeyPair(index: 0);
+    if (built.sourceAccount.ed25519AccountId != keyPair.accountId) {
+      throw Exception("The transaction was not built for this wallet");
+    }
+    if (built.signatures.isNotEmpty) {
+      throw Exception("The transaction is already signed");
+    }
+
+    final recipient = txData.recipients!.single;
+    var paid = Amount.zeroWith(fractionDigits: cryptoCurrency.fractionDigits);
+    for (final op in built.operations) {
+      final source = op.sourceAccount?.ed25519AccountId;
+      if (source != null && source != keyPair.accountId) {
+        throw Exception("The transaction spends from another account");
+      }
+      if (op is! stellar.PaymentOperation ||
+          op.asset is! stellar.AssetTypeNative ||
+          op.destination.ed25519AccountId != recipient.address) {
+        throw Exception("The transaction does more than pay the deposit");
+      }
+      paid += Amount.fromDecimal(
+        Decimal.parse(op.amount),
+        fractionDigits: cryptoCurrency.fractionDigits,
+      );
+    }
+    if (paid != recipient.amount) {
+      throw Exception(
+        "The transaction pays ${paid.decimal} instead of "
+        "${recipient.amount.decimal} to the deposit",
+      );
+    }
+
+    final fee = Amount(
+      rawValue: BigInt.from(built.fee),
+      fractionDigits: cryptoCurrency.fractionDigits,
+    );
+    if (recipient.amount + fee > info.cachedBalance.spendable) {
+      throw Exception("Insufficient XLM balance for this transaction and fee");
+    }
+
+    return txData.copyWith(fee: fee, prebuiltTransaction: envelopeXdr);
+  }
+
+  /// Signs and submits [TxData.prebuiltTransaction].
+  ///
+  /// The envelope's sequence number goes stale as soon as the account sends
+  /// anything else, so if it is no longer the next one the transaction is
+  /// rebuilt on the current sequence with the same operations, memo and fee
+  /// (and time bounds, while still valid).
+  Future<TxData> _confirmPrebuiltTransaction(TxData txData) async {
+    final keyPair = await _getSenderKeyPair(index: 0);
+    final sender = await (await stellarSdk).accounts.account(keyPair.accountId);
+    var tx = stellar.AbstractTransaction.fromEnvelopeXdrString(
+      txData.prebuiltTransaction!,
+    ) as stellar.Transaction;
+
+    if (tx.sequenceNumber != sender.sequenceNumber + BigInt.one) {
+      final builder = stellar.TransactionBuilder(sender)
+        ..setMaxOperationFee(tx.fee ~/ tx.operations.length);
+      if (tx.memo != null) builder.addMemo(tx.memo!);
+      for (final op in tx.operations) {
+        builder.addOperation(op);
+      }
+      final timeBounds = tx.preconditions?.timeBounds;
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      if (timeBounds != null &&
+          (timeBounds.maxTime == 0 || timeBounds.maxTime > now)) {
+        builder.addPreconditions(
+          stellar.TransactionPreconditions()..timeBounds = timeBounds,
+        );
+      }
+      tx = builder.build();
+    }
+
+    tx.sign(keyPair, stellarNetwork);
+    final response = await (await stellarSdk).submitTransaction(tx);
+    if (!response.success) {
+      throw Exception(
+        "${response.extras?.resultCodes?.transactionResultCode}"
+        " ::: ${response.extras?.resultCodes?.operationsResultCodes}",
+      );
+    }
+    return txData.copyWith(txHash: response.hash!, txid: response.hash!);
+  }
+
   @override
   Future<TxData> confirmSend({required TxData txData}) async {
+    if (txData.prebuiltTransaction != null) {
+      return await _confirmPrebuiltTransaction(txData);
+    }
+
     final senderKeyPair = await _getSenderKeyPair(index: 0);
     final sender = await (await stellarSdk).accounts.account(
       senderKeyPair.accountId,

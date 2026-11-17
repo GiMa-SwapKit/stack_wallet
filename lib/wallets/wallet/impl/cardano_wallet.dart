@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:blockchain_utils/bip/bip/bip44/base/bip44_base.dart';
 import 'package:blockchain_utils/bip/cardano/bip32/cardano_icarus_bip32.dart';
@@ -6,6 +7,8 @@ import 'package:blockchain_utils/bip/cardano/cip1852/cip1852.dart';
 import 'package:blockchain_utils/bip/cardano/cip1852/conf/cip1852_coins.dart';
 import 'package:blockchain_utils/bip/cardano/mnemonic/cardano_icarus_seed_generator.dart';
 import 'package:blockchain_utils/bip/cardano/shelley/cardano_shelley.dart';
+import 'package:blockchain_utils/crypto/quick_crypto.dart';
+import 'package:blockchain_utils/utils/binary/utils.dart';
 import 'package:isar_community/isar.dart';
 import 'package:on_chain/ada/ada.dart';
 import 'package:on_chain/ada/src/provider/exception/blockfrost_api_error.dart';
@@ -20,6 +23,7 @@ import '../../../models/isar/models/blockchain_data/transaction.dart' as isar;
 import '../../../models/paymint/fee_object_model.dart';
 import '../../../services/tor_service.dart';
 import '../../../utilities/amount/amount.dart';
+import '../../../utilities/cardano_raw_transaction.dart';
 import '../../../utilities/logger.dart';
 import '../../../utilities/prefs.dart';
 import '../../../utilities/tor_plain_net_option_enum.dart';
@@ -290,10 +294,103 @@ class CardanoWallet extends Bip39Wallet<Cardano> {
     }
   }
 
+  /// Prepares a transaction someone else built for this wallet, e.g. a swap
+  /// provider's deposit ([cborHex], the full transaction).
+  ///
+  /// [txData] has one recipient: the deposit address and the exact amount it
+  /// must receive. Every output must pay that address or this wallet back,
+  /// the transaction may do nothing but pay (no certificates, withdrawals or
+  /// minting), it must not be signed yet, and its fee must stay at or under
+  /// 10% of the amount.
+  Future<TxData> prepareSerializedTransaction({
+    required String cborHex,
+    required TxData txData,
+  }) async {
+    await updateProvider();
+
+    final bytes = Uint8List.fromList(BytesUtils.fromHexString(cborHex));
+    final raw = CardanoRawTransaction.fromBytes(bytes);
+    if (raw.hasWitnesses) {
+      throw Exception("The transaction is already signed");
+    }
+    // decoded only to check it; the body is signed as built
+    final body = ADATransaction.fromCborBytes(bytes).body;
+    if (body.certs != null || body.withdrawals != null || body.mint != null) {
+      throw Exception("The transaction does more than a payment");
+    }
+
+    final recipient = txData.recipients!.single;
+    final myAddress = (await getCurrentReceivingAddress())!.value;
+    BigInt toRecipient = BigInt.zero;
+    for (final output in body.outputs) {
+      final address = output.address.address;
+      if (address == recipient.address) {
+        if (output.amount.multiAsset != null) {
+          throw Exception("The transaction sends tokens to the deposit");
+        }
+        toRecipient += output.amount.coin;
+      } else if (address != myAddress) {
+        throw Exception(
+          "The transaction pays an address that is not the deposit",
+        );
+      }
+    }
+    if (toRecipient != recipient.amount.raw) {
+      throw Exception(
+        "The transaction pays ${toRecipient.toString()} lovelace instead of "
+        "${recipient.amount.raw} to the deposit",
+      );
+    }
+
+    final fee = Amount(
+      rawValue: body.fee,
+      fractionDigits: cryptoCurrency.fractionDigits,
+    );
+    if (body.fee * BigInt.from(10) > recipient.amount.raw) {
+      throw Exception("The transaction's fee is more than 10% of the amount");
+    }
+    if (recipient.amount + fee > info.cachedBalance.spendable) {
+      throw Exception("Insufficient ADA balance for this transaction and fee");
+    }
+
+    return txData.copyWith(fee: fee, prebuiltTransaction: cborHex);
+  }
+
+  /// Signs [TxData.prebuiltTransaction]'s body as built and submits it.
+  Future<TxData> _confirmPrebuiltTransaction(TxData txData) async {
+    final raw = CardanoRawTransaction.fromBytes(
+      Uint8List.fromList(BytesUtils.fromHexString(txData.prebuiltTransaction!)),
+    );
+
+    final bip32 = CardanoIcarusBip32.fromSeed(
+      CardanoIcarusSeedGenerator(await getMnemonic()).generate(),
+    );
+    final spend = bip32.derivePath("1852'/1815'/0'/0/0");
+    final privateKey = AdaPrivateKey.fromBytes(spend.privateKey.raw);
+
+    final witnessSet = TransactionWitnessSet(
+      vKeys: [
+        privateKey.createSignatureWitness(QuickCrypto.blake2b256Hash(raw.body)),
+      ],
+    );
+    final signed = raw.withWitnessSet(
+      Uint8List.fromList(witnessSet.serialize()),
+    );
+
+    final sentTx = await blockfrostProvider!.request(
+      BlockfrostRequestSubmitTransaction(transactionCborBytes: signed),
+    );
+    return txData.copyWith(txid: sentTx);
+  }
+
   @override
   Future<TxData> confirmSend({required TxData txData}) async {
     try {
       await updateProvider();
+
+      if (txData.prebuiltTransaction != null) {
+        return await _confirmPrebuiltTransaction(txData);
+      }
 
       final utxos = await blockfrostProvider!.request(
         BlockfrostRequestAddressUTXOsOfAGivenAsset(
