@@ -204,13 +204,6 @@ class SwapKitExchange extends Exchange {
     bool fixedRate,
   ) async {
     try {
-      if (fixedRate) {
-        throw ExchangeException(
-          "SwapKit does not support fixed rate",
-          ExchangeExceptionType.generic,
-        );
-      }
-
       final tokens = await SwapKitAPI.getTokens();
 
       // Prefer listed tokens when several share ticker + network, so a
@@ -237,7 +230,8 @@ class SwapKitExchange extends Exchange {
           image: t.logoURI ?? "",
           externalId: t.identifier,
           isFiat: false,
-          rateType: SupportedRateType.estimated,
+          // floating, and fixed through EXACT_OUTPUT (NEAR, Flashnet)
+          rateType: SupportedRateType.both,
           isAvailable: true,
           // a token on another chain (e.g. ETH on Arbitrum) is not the coin
           isStackCoin: _isNativeCoin(t) && AppConfig.isStackCoin(t.ticker),
@@ -270,14 +264,6 @@ class SwapKitExchange extends Exchange {
     String? toNetwork,
     bool fixedRate,
   ) async {
-    if (fixedRate) {
-      return ExchangeResponse(
-        exception: ExchangeException(
-          "SwapKit does not support fixed rate",
-          ExchangeExceptionType.generic,
-        ),
-      );
-    }
     return ExchangeResponse(
       value: Range(min: _lastReportedMin[_key(from, fromNetwork)]),
     );
@@ -294,28 +280,31 @@ class SwapKitExchange extends Exchange {
     bool reversed,
   ) async {
     try {
-      if (fixedRate) {
+      if (reversed && !fixedRate) {
         throw ExchangeException(
-          "SwapKit does not support fixed rate",
-          ExchangeExceptionType.generic,
-        );
-      }
-      if (reversed) {
-        // EXACT_OUTPUT exists but only NEAR/Flashnet serve it; not exposed yet.
-        throw ExchangeException(
-          "SwapKit does not support reversed estimates",
+          "SwapKit only takes an amount to receive for fixed rate swaps",
           ExchangeExceptionType.generic,
         );
       }
 
-      final quote = await _quote(from, fromNetwork, to, toNetwork, amount);
+      final quote = fixedRate
+          ? await _fixedQuote(
+              from,
+              fromNetwork,
+              to,
+              toNetwork,
+              amount,
+              reversed,
+            )
+          : await _quote(from, fromNetwork, to, toNetwork, sellAmount: amount);
 
       final estimates = _bestRoutePerProvider(quote.routes)
           .map(
             (r) => Estimate(
-              estimatedAmount: r.expectedBuyAmount,
-              fixedRate: false,
-              reversed: false,
+              // reversed: the amount to send for the requested output
+              estimatedAmount: reversed ? r.sellAmount : r.expectedBuyAmount,
+              fixedRate: fixedRate,
+              reversed: reversed,
               exchangeProvider: _displayName(r),
               rateId: r.routeId,
               warningMessage: _warningFor(r),
@@ -362,15 +351,9 @@ class SwapKitExchange extends Exchange {
     required bool reversed,
   }) async {
     try {
-      if (fixedRate) {
+      if (reversed && !fixedRate) {
         throw ExchangeException(
-          "SwapKit does not support fixed rate",
-          ExchangeExceptionType.generic,
-        );
-      }
-      if (reversed) {
-        throw ExchangeException(
-          "SwapKit does not support reversed trades",
+          "SwapKit only takes an amount to receive for fixed rate swaps",
           ExchangeExceptionType.generic,
         );
       }
@@ -391,12 +374,26 @@ class SwapKitExchange extends Exchange {
       final sellIdentifier = await _identifierFor(from, fromNetwork);
       final sellChain = _chainOf(sellIdentifier).toUpperCase();
 
-      Future<SkRoute> requote() =>
-          _requoteRoute(from, fromNetwork, to, toNetwork, amount, providerName);
+      final picked = estimate?.rateId == null
+          ? null
+          : _routes[estimate!.rateId];
 
-      SkRoute route =
-          (estimate?.rateId == null ? null : _routes[estimate!.rateId]) ??
-          await requote();
+      // A fixed rate re-quote keeps the output the user was shown.
+      Future<SkRoute> requote() => _requoteRoute(
+        from,
+        fromNetwork,
+        to,
+        toNetwork,
+        amount,
+        providerName,
+        fixedRate: fixedRate,
+        reversed: reversed,
+        buyAmount: fixedRate
+            ? picked?.expectedBuyAmount ?? (reversed ? amount : null)
+            : null,
+      );
+
+      SkRoute route = picked ?? await requote();
 
       ({SkSwap swap, SwapKitExecution execution}) created;
       try {
@@ -465,7 +462,7 @@ class SwapKitExchange extends Exchange {
         value: Trade(
           uuid: const Uuid().v1(),
           tradeId: swap.swapId,
-          rateType: "estimated",
+          rateType: fixedRate ? "fixed" : "estimated",
           direction: "direct",
           timestamp: swap.createdAt,
           updatedAt: swap.createdAt,
@@ -603,13 +600,16 @@ class SwapKitExchange extends Exchange {
   // ===========================================================================
   // helpers
 
+  /// Quotes [sellAmount] (EXACT_INPUT), or exactly [buyAmount]
+  /// (EXACT_OUTPUT, the fixed rate).
   Future<SkQuote> _quote(
     String from,
     String? fromNetwork,
     String to,
-    String? toNetwork,
-    Decimal amount,
-  ) async {
+    String? toNetwork, {
+    Decimal? sellAmount,
+    Decimal? buyAmount,
+  }) async {
     final sellAsset = await _identifierFor(from, fromNetwork);
     final buyAsset = await _identifierFor(to, toNetwork);
 
@@ -618,7 +618,8 @@ class SwapKitExchange extends Exchange {
       quote = await SwapKitAPI.getQuote(
         sellAsset: sellAsset,
         buyAsset: buyAsset,
-        sellAmount: amount,
+        sellAmount: sellAmount,
+        buyAmount: buyAmount,
         txHints: _txHintsFor(sellAsset),
       );
     } on SwapKitApiException catch (e) {
@@ -632,7 +633,7 @@ class SwapKitExchange extends Exchange {
     }
 
     final min = quote.reportedMinAmount;
-    if (min != null) {
+    if (min != null && sellAmount != null) {
       _lastReportedMin[_key(from, fromNetwork)] = min;
     }
     // routeIds are only valid for ~5 minutes, keep just the latest quote's
@@ -642,15 +643,66 @@ class SwapKitExchange extends Exchange {
     return quote;
   }
 
+  /// Fixed rate quote: SwapKit's EXACT_OUTPUT, where the output is
+  /// guaranteed. Only [_exactOutputProviders] serve it. With an amount to
+  /// send (not [reversed]), a regular quote first finds what that amount
+  /// buys, and that output is then quoted exactly.
+  Future<SkQuote> _fixedQuote(
+    String from,
+    String? fromNetwork,
+    String to,
+    String? toNetwork,
+    Decimal amount,
+    bool reversed,
+  ) async {
+    Decimal buyAmount = amount;
+    if (!reversed) {
+      final probe = await _quote(
+        from,
+        fromNetwork,
+        to,
+        toNetwork,
+        sellAmount: amount,
+      );
+      final outputs = probe.routes
+          .where(
+            (r) =>
+                r.providers.length == 1 &&
+                _exactOutputProviders.contains(r.providers.single),
+          )
+          .map((r) => r.expectedBuyAmount)
+          .toList();
+      if (outputs.isEmpty) {
+        throw ExchangeException(
+          "No fixed rate SwapKit route for this pair",
+          ExchangeExceptionType.orderNotFound,
+        );
+      }
+      buyAmount = outputs.reduce((a, b) => a > b ? a : b);
+    }
+    return _quote(from, fromNetwork, to, toNetwork, buyAmount: buyAmount);
+  }
+
+  /// Providers that serve EXACT_OUTPUT quotes (Flashnet only when buying
+  /// USDC or USDT).
+  static const Set<String> _exactOutputProviders = {"NEAR", "FLASHNET"};
+
   Future<SkRoute> _requoteRoute(
     String from,
     String? fromNetwork,
     String to,
     String? toNetwork,
     Decimal amount,
-    String? preferredProvider,
-  ) async {
-    final quote = await _quote(from, fromNetwork, to, toNetwork, amount);
+    String? preferredProvider, {
+    bool fixedRate = false,
+    bool reversed = false,
+    Decimal? buyAmount,
+  }) async {
+    final quote = !fixedRate
+        ? await _quote(from, fromNetwork, to, toNetwork, sellAmount: amount)
+        : buyAmount != null
+        ? await _quote(from, fromNetwork, to, toNetwork, buyAmount: buyAmount)
+        : await _fixedQuote(from, fromNetwork, to, toNetwork, amount, reversed);
     final routes = _bestRoutePerProvider(quote.routes);
     if (routes.isEmpty) {
       throw ExchangeException(

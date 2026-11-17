@@ -67,8 +67,8 @@ void main() {
       expect(await createError(extraId: "123"), contains("memos"));
       expect(await createError(refundExtraId: "123"), contains("memos"));
       expect(await createError(addressRefund: ""), contains("refund address"));
-      expect(await createError(fixedRate: true), contains("fixed rate"));
-      expect(await createError(reversed: true), contains("reversed"));
+      // an amount to receive is only taken for fixed rate (EXACT_OUTPUT)
+      expect(await createError(reversed: true), contains("fixed rate"));
     });
 
     Trade trade({required String payInTxid, String? other}) => Trade(
@@ -255,6 +255,24 @@ void main() {
         ],
       });
       expect(single.outboundHash, isNull);
+    });
+
+    test("track picks the leg paying the destination as the payout", () {
+      // shape of a completed USDC -> BTC swap via NEAR (live /track)
+      final t = SkTrack.fromMap({
+        "chainId": "1",
+        "hash": "0xdeposit",
+        "status": "completed",
+        "toAmount": "0.0154678",
+        "toAddress": "bc1qdest",
+        "legs": [
+          {"chainId": "1", "hash": "0xdeposit", "toAddress": "0xnear"},
+          {"chainId": "near", "hash": "NEARSWAP", "toAddress": "bc1qdest"},
+          {"chainId": "bitcoin", "hash": "btcpayout", "toAddress": "bc1qdest"},
+        ],
+      });
+      expect(t.outboundHash, "btcpayout");
+      expect(t.toAmount, "0.0154678");
     });
 
     // shapes taken from live /v3/swap responses

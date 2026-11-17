@@ -153,11 +153,14 @@ abstract class SwapKitAPI {
 
   /// POST /v3/quote
   ///
-  /// [sellAmount] is a human readable decimal amount.
+  /// Give [sellAmount] for a regular (EXACT_INPUT) quote, or [buyAmount] for
+  /// an EXACT_OUTPUT quote, where the output is guaranteed (the fixed rate;
+  /// only NEAR and Flashnet serve it). Amounts are human readable decimals.
   static Future<SkQuote> getQuote({
     required String sellAsset,
     required String buyAsset,
-    required Decimal sellAmount,
+    Decimal? sellAmount,
+    Decimal? buyAmount,
     String? sourceAddress,
     String? destinationAddress,
     num? slippage,
@@ -166,7 +169,11 @@ abstract class SwapKitAPI {
     final json = await _post(_buildUri("/v3/quote"), {
       "sellAsset": sellAsset,
       "buyAsset": buyAsset,
-      "sellAmount": sellAmount.toString(),
+      if (buyAmount != null) ...{
+        "buyAmount": buyAmount.toString(),
+        "quoteType": "EXACT_OUTPUT",
+      } else
+        "sellAmount": sellAmount!.toString(),
       if (sourceAddress != null) "sourceAddress": sourceAddress,
       if (destinationAddress != null) "destinationAddress": destinationAddress,
       if (slippage != null) "slippage": slippage,

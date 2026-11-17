@@ -28,10 +28,24 @@ class SkTrack {
 
   factory SkTrack.fromMap(Map<String, dynamic> map) {
     final legs = skMapList(map["legs"]);
-    final lastLegHash = legs.isNotEmpty
-        ? skStringOrNull(legs.last["hash"])
-        : null;
     final hash = skStringOrNull(map["hash"]);
+    final toAddress = skStringOrNull(map["toAddress"]);
+
+    // The payout is the last leg paying the swap's destination, e.g. legs
+    // [ETH deposit, NEAR swap, BTC send] for USDC -> BTC via NEAR. With a
+    // single leg, the leg hash is the deposit, not a payout.
+    String? outboundHash;
+    if (legs.length > 1) {
+      final payouts = legs.where(
+        (l) =>
+            toAddress != null &&
+            skStringOrNull(l["toAddress"]) == toAddress &&
+            skStringOrNull(l["hash"]) != hash,
+      );
+      final leg = payouts.isNotEmpty ? payouts.last : legs.last;
+      final legHash = skStringOrNull(leg["hash"]);
+      outboundHash = legHash != hash ? legHash : null;
+    }
 
     return SkTrack(
       status: skStringOrNull(map["status"]) ?? "unknown",
@@ -40,9 +54,8 @@ class SkTrack {
       chainId: skStringOrNull(map["chainId"]),
       fromAmount: skStringOrNull(map["fromAmount"]),
       toAmount: skStringOrNull(map["toAmount"]),
-      toAddress: skStringOrNull(map["toAddress"]),
-      // with a single leg the leg hash is the inbound hash, not a payout
-      outboundHash: legs.length > 1 && lastLegHash != hash ? lastLegHash : null,
+      toAddress: toAddress,
+      outboundHash: outboundHash,
     );
   }
 }
